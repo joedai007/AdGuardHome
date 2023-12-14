@@ -28,6 +28,7 @@ type accessManager struct {
 	allowedClientIDs *stringutil.Set
 	blockedClientIDs *stringutil.Set
 
+	// TODO(s.chzhen):  Use [aghnet.IgnoreEngine].
 	blockedHostsEng *urlfilter.DNSEngine
 
 	// TODO(a.garipov): Create a type for a set of IP networks.
@@ -90,7 +91,7 @@ func newAccessCtx(allowed, blocked, blockedHosts []string) (a *accessManager, er
 
 	lists := []filterlist.RuleList{
 		&filterlist.StringRuleList{
-			ID:             int(0),
+			ID:             0,
 			RulesText:      b.String(),
 			IgnoreCosmetic: true,
 		},
@@ -131,7 +132,6 @@ func (a *accessManager) isBlockedClientID(id string) (ok bool) {
 func (a *accessManager) isBlockedHost(host string, qt rules.RRType) (ok bool) {
 	_, ok = a.blockedHostsEng.MatchRequest(&urlfilter.DNSRequest{
 		Hostname: host,
-		ClientIP: "0.0.0.0",
 		DNSType:  qt,
 	})
 
@@ -182,8 +182,9 @@ func (s *Server) accessListJSON() (j accessListJSON) {
 	}
 }
 
+// handleAccessList handles requests to the GET /control/access/list endpoint.
 func (s *Server) handleAccessList(w http.ResponseWriter, r *http.Request) {
-	_ = aghhttp.WriteJSONResponse(w, r, s.accessListJSON())
+	aghhttp.WriteJSONResponseOK(w, r, s.accessListJSON())
 }
 
 // validateAccessSet checks the internal accessListJSON lists.  To search for
@@ -224,6 +225,7 @@ func validateStrUniq(clients []string) (uc aghalg.UniqChecker[string], err error
 	return uc, uc.Validate()
 }
 
+// handleAccessSet handles requests to the POST /control/access/set endpoint.
 func (s *Server) handleAccessSet(w http.ResponseWriter, r *http.Request) {
 	list := &accessListJSON{}
 	err := json.NewDecoder(r.Body).Decode(&list)

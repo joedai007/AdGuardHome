@@ -54,7 +54,7 @@ code.
 
 
  *  [Getting Started](#getting-started)
-     *  [Automated install (Unix)](#automated-install-linux-and-mac)
+     *  [Automated install (Linux/Unix/MacOS/FreeBSD/OpenBSD)](#automated-install-linux-and-mac)
      *  [Alternative methods](#alternative-methods)
      *  [Guides](#guides)
      *  [API](#api)
@@ -79,7 +79,7 @@ code.
 
 ##  <a href="#getting-started" id="getting-started" name="getting-started">Getting Started</a>
 
-   ###  <a href="#automated-install-linux-and-mac" id="automated-install-linux-and-mac" name="automated-install-linux-and-mac">Automated install (Unix)</a>
+   ###  <a href="#automated-install-linux-and-mac" id="automated-install-linux-and-mac" name="automated-install-linux-and-mac">Automated install (Linux/Unix/MacOS/FreeBSD/OpenBSD)</a>
 
 To install with `curl` run the following command:
 
@@ -201,7 +201,7 @@ opinion, this cannot be legitimately counted as a Pi-Hole's feature.
 | Cross-platform                                                          | ✅                | ❌ (not natively, only via Docker)                        |
 | Running as a DNS-over-HTTPS or DNS-over-TLS server                      | ✅                | ❌ (requires additional software)                         |
 | Blocking phishing and malware domains                                   | ✅                | ❌ (requires non-default blocklists)                      |
-| Parental control (blocking adult domains)                               | ✅                | ❌                                                        |
+| Parental control (blocking adult domains)                               | ✅                | ❌ (requires non-default blocklists)                      |
 | Force Safe search on search engines                                     | ✅                | ❌                                                        |
 | Per-client (device) configuration                                       | ✅                | ✅                                                        |
 | Access settings (choose who can use AGH DNS)                            | ✅                | ❌                                                        |
@@ -261,9 +261,9 @@ Run `make init` to prepare the development environment.
 
 You will need this to build AdGuard Home:
 
- *  [Go](https://golang.org/dl/) v1.19 or later;
- *  [Node.js](https://nodejs.org/en/download/) v10.16.2 or later;
- *  [npm](https://www.npmjs.com/) v6.14 or later;
+ *  [Go](https://golang.org/dl/) v1.20 or later;
+ *  [Node.js](https://nodejs.org/en/download/) v16 or later;
+ *  [npm](https://www.npmjs.com/) v8 or later;
  *  [yarn](https://yarnpkg.com/) v1.22.5 or later.
 
 
@@ -416,7 +416,8 @@ There are three options how you can install an unstable version:
    ###  <a href="#reporting-issues" id="reporting-issues" name="reporting-issues">Report issues</a>
 
 If you run into any problem or have a suggestion, head to [this page][iss] and
-click on the “New issue” button.
+click on the “New issue” button.  Please follow the instructions in the issue
+form carefully and don't forget to start by searching for duplicates.
 
 [iss]: https://github.com/AdguardTeam/AdGuardHome/issues
 
@@ -465,6 +466,10 @@ bug or implementing the feature.
  *  [Prometheus exporter for AdGuard
     Home](https://github.com/ebrianne/adguard-exporter) by
     [@ebrianne](https://github.com/ebrianne).
+
+ *  [Terminal-based, real-time traffic monitoring and statistics for your AdGuard Home
+    instance](https://github.com/Lissy93/AdGuardian-Term) by
+    [@Lissy93](https://github.com/Lissy93)
 
  *  [AdGuard Home on GLInet
     routers](https://forum.gl-inet.com/t/adguardhome-on-gl-routers/10664) by

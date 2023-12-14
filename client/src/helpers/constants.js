@@ -26,7 +26,12 @@ export const R_WIN_ABSOLUTE_PATH = /^([a-zA-Z]:)?(\\|\/)(?:[^\\/:*?"<>|\x00]+\\)
 
 export const R_CLIENT_ID = /^[a-z0-9-]{1,63}$/;
 
+export const R_IPV4_SUBNET = /^([0-9]|[1-2][0-9]|3[0-2])?$/;
+
+export const R_IPV6_SUBNET = /^([0-9]|[1-9][0-9]|1[0-1][0-9]|12[0-8])?$/;
+
 export const MIN_PASSWORD_LENGTH = 8;
+export const MAX_PASSWORD_LENGTH = 72;
 
 export const HTML_PAGES = {
     INSTALL: '/install.html',
@@ -173,6 +178,9 @@ export const MODAL_TYPE = {
     ADD_FILTERS: 'ADD_FILTERS',
     EDIT_FILTERS: 'EDIT_FILTERS',
     CHOOSE_FILTERING_LIST: 'CHOOSE_FILTERING_LIST',
+    ADD_REWRITE: 'ADD_REWRITE',
+    EDIT_REWRITE: 'EDIT_REWRITE',
+    EDIT_LEASE: 'EDIT_LEASE',
 };
 
 export const CLIENT_ID = {
@@ -219,6 +227,12 @@ export const DAY = HOUR * 24;
 export const STATS_INTERVALS_DAYS = [DAY, DAY * 7, DAY * 30, DAY * 90];
 
 export const QUERY_LOG_INTERVALS_DAYS = [HOUR * 6, DAY, DAY * 7, DAY * 30, DAY * 90];
+
+export const RETENTION_CUSTOM = 1;
+
+export const RETENTION_CUSTOM_INPUT = 'custom_retention_input';
+
+export const CUSTOM_INTERVAL = 'customInterval';
 
 export const FILTERS_INTERVALS_HOURS = [0, 1, 12, 24, 72, 168];
 
@@ -462,6 +476,11 @@ export const UINT32_RANGE = {
     MAX: 4294967295,
 };
 
+export const RETENTION_RANGE = {
+    MIN: 1,
+    MAX: 365 * 24,
+};
+
 export const DHCP_VALUES_PLACEHOLDERS = {
     ipv4: {
         subnet_mask: '255.255.255.0',
@@ -536,4 +555,15 @@ export const DISABLE_PROTECTION_TIMINGS = {
     TEN_MINUTES: 10 * 60 * 1000,
     HOUR: 60 * 60 * 1000,
     TOMORROW: 24 * 60 * 60 * 1000,
+};
+
+export const LOCAL_TIMEZONE_VALUE = 'Local';
+
+export const TABLES_MIN_ROWS = 5;
+
+export const DASHBOARD_TABLES_DEFAULT_PAGE_SIZE = 100;
+
+export const TIME_UNITS = {
+    HOURS: 'hours',
+    DAYS: 'days',
 };

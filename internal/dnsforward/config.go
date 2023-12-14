@@ -12,7 +12,9 @@ import (
 
 	"github.com/AdguardTeam/AdGuardHome/internal/aghalg"
 	"github.com/AdguardTeam/AdGuardHome/internal/aghhttp"
+	"github.com/AdguardTeam/AdGuardHome/internal/aghnet"
 	"github.com/AdguardTeam/AdGuardHome/internal/aghtls"
+	"github.com/AdguardTeam/AdGuardHome/internal/client"
 	"github.com/AdguardTeam/AdGuardHome/internal/filtering"
 	"github.com/AdguardTeam/dnsproxy/proxy"
 	"github.com/AdguardTeam/dnsproxy/upstream"
@@ -25,73 +27,30 @@ import (
 	"golang.org/x/exp/slices"
 )
 
-// BlockingMode is an enum of all allowed blocking modes.
-type BlockingMode string
+// ClientsContainer provides information about preconfigured DNS clients.
+type ClientsContainer interface {
+	// UpstreamConfigByID returns the custom upstream configuration for the
+	// client having id, using boot to initialize the one if necessary.  It
+	// returns nil if there is no custom upstream configuration for the client.
+	// The id is expected to be either a string representation of an IP address
+	// or the ClientID.
+	UpstreamConfigByID(
+		id string,
+		boot upstream.Resolver,
+	) (conf *proxy.CustomUpstreamConfig, err error)
+}
 
-// Allowed blocking modes.
-const (
-	// BlockingModeCustomIP means respond with a custom IP address.
-	BlockingModeCustomIP BlockingMode = "custom_ip"
-
-	// BlockingModeDefault is the same as BlockingModeNullIP for
-	// Adblock-style rules, but responds with the IP address specified in
-	// the rule when blocked by an `/etc/hosts`-style rule.
-	BlockingModeDefault BlockingMode = "default"
-
-	// BlockingModeNullIP means respond with a zero IP address: "0.0.0.0"
-	// for A requests and "::" for AAAA ones.
-	BlockingModeNullIP BlockingMode = "null_ip"
-
-	// BlockingModeNXDOMAIN means respond with the NXDOMAIN code.
-	BlockingModeNXDOMAIN BlockingMode = "nxdomain"
-
-	// BlockingModeREFUSED means respond with the REFUSED code.
-	BlockingModeREFUSED BlockingMode = "refused"
-)
-
-// FilteringConfig represents the DNS filtering configuration of AdGuard Home
-// The zero FilteringConfig is empty and ready for use.
-type FilteringConfig struct {
+// Config represents the DNS filtering configuration of AdGuard Home. The zero
+// Config is empty and ready for use.
+type Config struct {
 	// Callbacks for other modules
 
 	// FilterHandler is an optional additional filtering callback.
-	FilterHandler func(clientAddr net.IP, clientID string, settings *filtering.Settings) `yaml:"-"`
+	FilterHandler func(cliAddr netip.Addr, clientID string, settings *filtering.Settings) `yaml:"-"`
 
-	// GetCustomUpstreamByClient is a callback that returns upstreams
-	// configuration based on the client IP address or ClientID.  It returns
-	// nil if there are no custom upstreams for the client.
-	GetCustomUpstreamByClient func(id string) (conf *proxy.UpstreamConfig, err error) `yaml:"-"`
-
-	// Protection configuration
-
-	// ProtectionEnabled defines whether or not use any of filtering features.
-	ProtectionEnabled bool `yaml:"protection_enabled"`
-
-	// BlockingMode defines the way how blocked responses are constructed.
-	BlockingMode BlockingMode `yaml:"blocking_mode"`
-
-	// BlockingIPv4 is the IP address to be returned for a blocked A request.
-	BlockingIPv4 net.IP `yaml:"blocking_ipv4"`
-
-	// BlockingIPv6 is the IP address to be returned for a blocked AAAA
-	// request.
-	BlockingIPv6 net.IP `yaml:"blocking_ipv6"`
-
-	// BlockedResponseTTL is the time-to-live value for blocked responses.  If
-	// 0, then default value is used (3600).
-	BlockedResponseTTL uint32 `yaml:"blocked_response_ttl"`
-
-	// ProtectionDisabledUntil is the timestamp until when the protection is
-	// disabled.
-	ProtectionDisabledUntil *time.Time `yaml:"protection_disabled_until"`
-
-	// ParentalBlockHost is the IP (or domain name) which is used to respond to
-	// DNS requests blocked by parental control.
-	ParentalBlockHost string `yaml:"parental_block_host"`
-
-	// SafeBrowsingBlockHost is the IP (or domain name) which is used to
-	// respond to DNS requests blocked by safe-browsing.
-	SafeBrowsingBlockHost string `yaml:"safebrowsing_block_host"`
+	// ClientsContainer stores the information about special handling of some
+	// DNS clients.
+	ClientsContainer ClientsContainer `yaml:"-"`
 
 	// Anti-DNS amplification
 
@@ -99,8 +58,16 @@ type FilteringConfig struct {
 	// (0 to disable).
 	Ratelimit uint32 `yaml:"ratelimit"`
 
+	// RatelimitSubnetLenIPv4 is a subnet length for IPv4 addresses used for
+	// rate limiting requests.
+	RatelimitSubnetLenIPv4 int `yaml:"ratelimit_subnet_len_ipv4"`
+
+	// RatelimitSubnetLenIPv6 is a subnet length for IPv6 addresses used for
+	// rate limiting requests.
+	RatelimitSubnetLenIPv6 int `yaml:"ratelimit_subnet_len_ipv6"`
+
 	// RatelimitWhitelist is the list of whitelisted client IP addresses.
-	RatelimitWhitelist []string `yaml:"ratelimit_whitelist"`
+	RatelimitWhitelist []netip.Addr `yaml:"ratelimit_whitelist"`
 
 	// RefuseAny, if true, refuse ANY requests.
 	RefuseAny bool `yaml:"refuse_any"`
@@ -118,6 +85,10 @@ type FilteringConfig struct {
 	// resolvers (plain DNS only).
 	BootstrapDNS []string `yaml:"bootstrap_dns"`
 
+	// FallbackDNS is the list of fallback DNS servers used when upstream DNS
+	// servers are not responding.
+	FallbackDNS []string `yaml:"fallback_dns"`
+
 	// AllServers, if true, parallel queries to all configured upstream servers
 	// are enabled.
 	AllServers bool `yaml:"all_servers"`
@@ -133,7 +104,7 @@ type FilteringConfig struct {
 
 	// AllowedClients is the slice of IP addresses, CIDR networks, and
 	// ClientIDs of allowed clients.  If not empty, only these clients are
-	// allowed, and [FilteringConfig.DisallowedClients] are ignored.
+	// allowed, and [Config.DisallowedClients] are ignored.
 	AllowedClients []string `yaml:"allowed_clients"`
 
 	// DisallowedClients is the slice of IP addresses, CIDR networks, and
@@ -271,9 +242,15 @@ type ServerConfig struct {
 	UDPListenAddrs []*net.UDPAddr        // UDP listen address
 	TCPListenAddrs []*net.TCPAddr        // TCP listen address
 	UpstreamConfig *proxy.UpstreamConfig // Upstream DNS servers config
-	OnDNSRequest   func(d *proxy.DNSContext)
 
-	FilteringConfig
+	// AddrProcConf defines the configuration for the client IP processor.
+	// If nil, [client.EmptyAddrProc] is used.
+	//
+	// TODO(a.garipov): The use of [client.EmptyAddrProc] is a crutch for tests.
+	// Remove that.
+	AddrProcConf *client.DefaultAddrProcConfig
+
+	Config
 	TLSConfig
 	DNSCryptConfig
 	TLSAllowUnencryptedDoH bool
@@ -299,9 +276,6 @@ type ServerConfig struct {
 	// DNS64Prefixes is a slice of NAT64 prefixes to be used for DNS64.
 	DNS64Prefixes []netip.Prefix
 
-	// ResolveClients signals if the RDNS should resolve clients' addresses.
-	ResolveClients bool
-
 	// UsePrivateRDNS defines if the PTR requests for unknown addresses from
 	// locally-served networks should be resolved via private PTR resolvers.
 	UsePrivateRDNS bool
@@ -315,23 +289,19 @@ type ServerConfig struct {
 	// UseHTTP3Upstreams defines if HTTP/3 is be allowed for DNS-over-HTTPS
 	// upstreams.
 	UseHTTP3Upstreams bool
+
+	// ServePlainDNS defines if plain DNS is allowed for incoming requests.
+	ServePlainDNS bool
 }
 
-// if any of ServerConfig values are zero, then default values from below are used
-var defaultValues = ServerConfig{
-	UDPListenAddrs:  []*net.UDPAddr{{Port: 53}},
-	TCPListenAddrs:  []*net.TCPAddr{{Port: 53}},
-	FilteringConfig: FilteringConfig{BlockedResponseTTL: 3600},
-}
-
-// createProxyConfig creates and validates configuration for the main proxy.
-func (s *Server) createProxyConfig() (conf proxy.Config, err error) {
+// newProxyConfig creates and validates configuration for the main proxy.
+func (s *Server) newProxyConfig() (conf *proxy.Config, err error) {
 	srvConf := s.conf
-	conf = proxy.Config{
-		UDPListenAddr:          srvConf.UDPListenAddrs,
-		TCPListenAddr:          srvConf.TCPListenAddrs,
+	conf = &proxy.Config{
 		HTTP3:                  srvConf.ServeHTTP3,
 		Ratelimit:              int(srvConf.Ratelimit),
+		RatelimitSubnetLenIPv4: srvConf.RatelimitSubnetLenIPv4,
+		RatelimitSubnetLenIPv6: srvConf.RatelimitSubnetLenIPv6,
 		RatelimitWhitelist:     srvConf.RatelimitWhitelist,
 		RefuseAny:              srvConf.RefuseAny,
 		TrustedProxies:         srvConf.TrustedProxies,
@@ -341,6 +311,7 @@ func (s *Server) createProxyConfig() (conf proxy.Config, err error) {
 		UpstreamConfig:         srvConf.UpstreamConfig,
 		BeforeRequestHandler:   s.beforeRequestHandler,
 		RequestHandler:         s.handleDNSRequest,
+		HTTPSServerName:        aghhttp.UserAgent(),
 		EnableEDNSClientSubnet: srvConf.EDNSClientSubnet.Enabled,
 		MaxGoroutines:          int(srvConf.MaxGoroutines),
 		UseDNS64:               srvConf.UseDNS64,
@@ -358,27 +329,25 @@ func (s *Server) createProxyConfig() (conf proxy.Config, err error) {
 	}
 
 	setProxyUpstreamMode(
-		&conf,
+		conf,
 		srvConf.AllServers,
 		srvConf.FastestAddr,
 		srvConf.FastestTimeout.Duration,
 	)
 
-	for i, s := range srvConf.BogusNXDomain {
-		var subnet *net.IPNet
-		subnet, err = netutil.ParseSubnet(s)
-		if err != nil {
-			log.Error("subnet at index %d: %s", i, err)
-
-			continue
-		}
-
-		conf.BogusNXDomain = append(conf.BogusNXDomain, subnet)
+	conf.BogusNXDomain, err = parseBogusNXDOMAIN(srvConf.BogusNXDomain)
+	if err != nil {
+		return nil, fmt.Errorf("bogus_nxdomain: %w", err)
 	}
 
-	err = s.prepareTLS(&conf)
+	err = s.prepareTLS(conf)
 	if err != nil {
-		return proxy.Config{}, fmt.Errorf("validating tls: %w", err)
+		return nil, fmt.Errorf("validating tls: %w", err)
+	}
+
+	err = s.preparePlain(conf)
+	if err != nil {
+		return nil, fmt.Errorf("validating plain: %w", err)
 	}
 
 	if c := srvConf.DNSCryptConfig; c.Enabled {
@@ -389,16 +358,28 @@ func (s *Server) createProxyConfig() (conf proxy.Config, err error) {
 	}
 
 	if conf.UpstreamConfig == nil || len(conf.UpstreamConfig.Upstreams) == 0 {
-		return proxy.Config{}, errors.Error("no default upstream servers configured")
+		return nil, errors.Error("no default upstream servers configured")
 	}
 
 	return conf, nil
 }
 
-const (
-	defaultSafeBrowsingBlockHost = "standard-block.dns.adguard.com"
-	defaultParentalBlockHost     = "family-block.dns.adguard.com"
-)
+// parseBogusNXDOMAIN parses the bogus NXDOMAIN strings into valid subnets.
+func parseBogusNXDOMAIN(confBogusNXDOMAIN []string) (subnets []netip.Prefix, err error) {
+	for i, s := range confBogusNXDOMAIN {
+		var subnet netip.Prefix
+		subnet, err = aghnet.ParseSubnet(s)
+		if err != nil {
+			return nil, fmt.Errorf("subnet at index %d: %w", i, err)
+		}
+
+		subnets = append(subnets, subnet)
+	}
+
+	return subnets, nil
+}
+
+const defaultBlockedResponseTTL = 3600
 
 // initDefaultSettings initializes default settings if nothing
 // is configured
@@ -411,20 +392,12 @@ func (s *Server) initDefaultSettings() {
 		s.conf.BootstrapDNS = defaultBootstrap
 	}
 
-	if s.conf.ParentalBlockHost == "" {
-		s.conf.ParentalBlockHost = defaultParentalBlockHost
-	}
-
-	if s.conf.SafeBrowsingBlockHost == "" {
-		s.conf.SafeBrowsingBlockHost = defaultSafeBrowsingBlockHost
-	}
-
 	if s.conf.UDPListenAddrs == nil {
-		s.conf.UDPListenAddrs = defaultValues.UDPListenAddrs
+		s.conf.UDPListenAddrs = defaultUDPListenAddrs
 	}
 
 	if s.conf.TCPListenAddrs == nil {
-		s.conf.TCPListenAddrs = defaultValues.TCPListenAddrs
+		s.conf.TCPListenAddrs = defaultTCPListenAddrs
 	}
 
 	if len(s.conf.BlockedHosts) == 0 {
@@ -436,102 +409,6 @@ func (s *Server) initDefaultSettings() {
 	}
 }
 
-// UpstreamHTTPVersions returns the HTTP versions for upstream configuration
-// depending on configuration.
-func UpstreamHTTPVersions(http3 bool) (v []upstream.HTTPVersion) {
-	if !http3 {
-		return upstream.DefaultHTTPVersions
-	}
-
-	return []upstream.HTTPVersion{
-		upstream.HTTPVersion3,
-		upstream.HTTPVersion2,
-		upstream.HTTPVersion11,
-	}
-}
-
-// prepareUpstreamSettings - prepares upstream DNS server settings
-func (s *Server) prepareUpstreamSettings() error {
-	// We're setting a customized set of RootCAs.  The reason is that Go default
-	// mechanism of loading TLS roots does not always work properly on some
-	// routers so we're loading roots manually and pass it here.
-	//
-	// See [aghtls.SystemRootCAs].
-	upstream.RootCAs = s.conf.TLSv12Roots
-	upstream.CipherSuites = s.conf.TLSCiphers
-
-	// Load upstreams either from the file, or from the settings
-	var upstreams []string
-	if s.conf.UpstreamDNSFileName != "" {
-		data, err := os.ReadFile(s.conf.UpstreamDNSFileName)
-		if err != nil {
-			return fmt.Errorf("reading upstream from file: %w", err)
-		}
-
-		upstreams = stringutil.SplitTrimmed(string(data), "\n")
-
-		log.Debug("dns: using %d upstream servers from file %s", len(upstreams), s.conf.UpstreamDNSFileName)
-	} else {
-		upstreams = s.conf.UpstreamDNS
-	}
-
-	httpVersions := UpstreamHTTPVersions(s.conf.UseHTTP3Upstreams)
-	upstreams = stringutil.FilterOut(upstreams, IsCommentOrEmpty)
-	upstreamConfig, err := proxy.ParseUpstreamsConfig(
-		upstreams,
-		&upstream.Options{
-			Bootstrap:    s.conf.BootstrapDNS,
-			Timeout:      s.conf.UpstreamTimeout,
-			HTTPVersions: httpVersions,
-			PreferIPv6:   s.conf.BootstrapPreferIPv6,
-		},
-	)
-	if err != nil {
-		return fmt.Errorf("parsing upstream config: %w", err)
-	}
-
-	if len(upstreamConfig.Upstreams) == 0 {
-		log.Info("warning: no default upstream servers specified, using %v", defaultDNS)
-		var uc *proxy.UpstreamConfig
-		uc, err = proxy.ParseUpstreamsConfig(
-			defaultDNS,
-			&upstream.Options{
-				Bootstrap:    s.conf.BootstrapDNS,
-				Timeout:      s.conf.UpstreamTimeout,
-				HTTPVersions: httpVersions,
-				PreferIPv6:   s.conf.BootstrapPreferIPv6,
-			},
-		)
-		if err != nil {
-			return fmt.Errorf("parsing default upstreams: %w", err)
-		}
-
-		upstreamConfig.Upstreams = uc.Upstreams
-	}
-
-	s.conf.UpstreamConfig = upstreamConfig
-
-	return nil
-}
-
-// setProxyUpstreamMode sets the upstream mode and related settings in conf
-// based on provided parameters.
-func setProxyUpstreamMode(
-	conf *proxy.Config,
-	allServers bool,
-	fastestAddr bool,
-	fastestTimeout time.Duration,
-) {
-	if allServers {
-		conf.UpstreamMode = proxy.UModeParallel
-	} else if fastestAddr {
-		conf.UpstreamMode = proxy.UModeFastestAddr
-		conf.FastestPingTimeout = fastestTimeout
-	} else {
-		conf.UpstreamMode = proxy.UModeLoadBalance
-	}
-}
-
 // prepareIpsetListSettings reads and prepares the ipset configuration either
 // from a file or from the data in the configuration file.
 func (s *Server) prepareIpsetListSettings() (err error) {
@@ -540,6 +417,7 @@ func (s *Server) prepareIpsetListSettings() (err error) {
 		return s.ipset.init(s.conf.IpsetList)
 	}
 
+	// #nosec G304 -- Trust the path explicitly given by the user.
 	data, err := os.ReadFile(fn)
 	if err != nil {
 		return err
@@ -550,6 +428,152 @@ func (s *Server) prepareIpsetListSettings() (err error) {
 	log.Debug("dns: using %d ipset rules from file %q", len(ipsets), fn)
 
 	return s.ipset.init(ipsets)
+}
+
+// collectListenAddr adds addrPort to addrs.  It also adds its port to
+// unspecPorts if its address is unspecified.
+func collectListenAddr(
+	addrPort netip.AddrPort,
+	addrs map[netip.AddrPort]unit,
+	unspecPorts map[uint16]unit,
+) {
+	if addrPort == (netip.AddrPort{}) {
+		return
+	}
+
+	addrs[addrPort] = unit{}
+	if addrPort.Addr().IsUnspecified() {
+		unspecPorts[addrPort.Port()] = unit{}
+	}
+}
+
+// collectDNSAddrs returns configured set of listening addresses.  It also
+// returns a set of ports of each unspecified listening address.
+func (conf *ServerConfig) collectDNSAddrs() (addrs mapAddrPortSet, unspecPorts map[uint16]unit) {
+	// TODO(e.burkov):  Perhaps, we shouldn't allocate as much memory, since the
+	// TCP and UDP listening addresses are currently the same.
+	addrs = make(map[netip.AddrPort]unit, len(conf.TCPListenAddrs)+len(conf.UDPListenAddrs))
+	unspecPorts = map[uint16]unit{}
+
+	for _, laddr := range conf.TCPListenAddrs {
+		collectListenAddr(laddr.AddrPort(), addrs, unspecPorts)
+	}
+
+	for _, laddr := range conf.UDPListenAddrs {
+		collectListenAddr(laddr.AddrPort(), addrs, unspecPorts)
+	}
+
+	return addrs, unspecPorts
+}
+
+// defaultPlainDNSPort is the default port for plain DNS.
+const defaultPlainDNSPort uint16 = 53
+
+// addrPortSet is a set of [netip.AddrPort] values.
+type addrPortSet interface {
+	// Has returns true if addrPort is in the set.
+	Has(addrPort netip.AddrPort) (ok bool)
+}
+
+// type check
+var _ addrPortSet = emptyAddrPortSet{}
+
+// emptyAddrPortSet is the [addrPortSet] containing no values.
+type emptyAddrPortSet struct{}
+
+// Has implements the [addrPortSet] interface for [emptyAddrPortSet].
+func (emptyAddrPortSet) Has(_ netip.AddrPort) (ok bool) { return false }
+
+// mapAddrPortSet is the [addrPortSet] containing values of [netip.AddrPort] as
+// keys of a map.
+type mapAddrPortSet map[netip.AddrPort]unit
+
+// type check
+var _ addrPortSet = mapAddrPortSet{}
+
+// Has implements the [addrPortSet] interface for [mapAddrPortSet].
+func (m mapAddrPortSet) Has(addrPort netip.AddrPort) (ok bool) {
+	_, ok = m[addrPort]
+
+	return ok
+}
+
+// combinedAddrPortSet is the [addrPortSet] defined by some IP addresses along
+// with ports, any combination of which is considered being in the set.
+type combinedAddrPortSet struct {
+	// TODO(e.burkov):  Use sorted slices in combination with binary search.
+	ports map[uint16]unit
+	addrs []netip.Addr
+}
+
+// type check
+var _ addrPortSet = (*combinedAddrPortSet)(nil)
+
+// Has implements the [addrPortSet] interface for [*combinedAddrPortSet].
+func (m *combinedAddrPortSet) Has(addrPort netip.AddrPort) (ok bool) {
+	_, ok = m.ports[addrPort.Port()]
+
+	return ok && slices.Contains(m.addrs, addrPort.Addr())
+}
+
+// filterOut filters out all the upstreams that match um.  It returns all the
+// closing errors joined.
+func filterOutAddrs(upsConf *proxy.UpstreamConfig, set addrPortSet) (err error) {
+	var errs []error
+	delFunc := func(u upstream.Upstream) (ok bool) {
+		// TODO(e.burkov):  We should probably consider the protocol of u to
+		// only filter out the listening addresses of the same protocol.
+		addr, parseErr := aghnet.ParseAddrPort(u.Address(), defaultPlainDNSPort)
+		if parseErr != nil || !set.Has(addr) {
+			// Don't filter out the upstream if it either cannot be parsed, or
+			// does not match m.
+			return false
+		}
+
+		errs = append(errs, u.Close())
+
+		return true
+	}
+
+	upsConf.Upstreams = slices.DeleteFunc(upsConf.Upstreams, delFunc)
+	for d, ups := range upsConf.DomainReservedUpstreams {
+		upsConf.DomainReservedUpstreams[d] = slices.DeleteFunc(ups, delFunc)
+	}
+	for d, ups := range upsConf.SpecifiedDomainUpstreams {
+		upsConf.SpecifiedDomainUpstreams[d] = slices.DeleteFunc(ups, delFunc)
+	}
+
+	return errors.Join(errs...)
+}
+
+// ourAddrsSet returns an addrPortSet that contains all the configured listening
+// addresses.
+func (conf *ServerConfig) ourAddrsSet() (m addrPortSet, err error) {
+	addrs, unspecPorts := conf.collectDNSAddrs()
+	switch {
+	case len(addrs) == 0:
+		log.Debug("dnsforward: no listen addresses")
+
+		return emptyAddrPortSet{}, nil
+	case len(unspecPorts) == 0:
+		log.Debug("dnsforward: filtering out addresses %s", addrs)
+
+		return addrs, nil
+	default:
+		var ifaceAddrs []netip.Addr
+		ifaceAddrs, err = aghnet.CollectAllIfacesAddrs()
+		if err != nil {
+			// Don't wrap the error since it's informative enough as is.
+			return nil, err
+		}
+
+		log.Debug("dnsforward: filtering out addresses %s on ports %d", ifaceAddrs, unspecPorts)
+
+		return &combinedAddrPortSet{
+			ports: unspecPorts,
+			addrs: ifaceAddrs,
+		}, nil
+	}
 }
 
 // prepareTLS - prepares TLS configuration for the DNS proxy
@@ -606,7 +630,7 @@ func (s *Server) prepareTLS(proxyConfig *proxy.Config) (err error) {
 
 // isWildcard returns true if host is a wildcard hostname.
 func isWildcard(host string) (ok bool) {
-	return len(host) >= 2 && host[0] == '*' && host[1] == '.'
+	return strings.HasPrefix(host, "*.")
 }
 
 // matchesDomainWildcard returns true if host matches the domain wildcard
@@ -646,19 +670,44 @@ func (s *Server) onGetCertificate(ch *tls.ClientHelloInfo) (*tls.Certificate, er
 	return &s.conf.cert, nil
 }
 
+// preparePlain prepares the plain-DNS configuration for the DNS proxy.
+// preparePlain assumes that prepareTLS has already been called.
+func (s *Server) preparePlain(proxyConf *proxy.Config) (err error) {
+	if s.conf.ServePlainDNS {
+		proxyConf.UDPListenAddr = s.conf.UDPListenAddrs
+		proxyConf.TCPListenAddr = s.conf.TCPListenAddrs
+
+		return nil
+	}
+
+	lenEncrypted := len(proxyConf.DNSCryptTCPListenAddr) +
+		len(proxyConf.DNSCryptUDPListenAddr) +
+		len(proxyConf.HTTPSListenAddr) +
+		len(proxyConf.QUICListenAddr) +
+		len(proxyConf.TLSListenAddr)
+	if lenEncrypted == 0 {
+		// TODO(a.garipov): Support full disabling of all DNS.
+		return errors.Error("disabling plain dns requires at least one encrypted protocol")
+	}
+
+	log.Info("dnsforward: warning: plain dns is disabled")
+
+	return nil
+}
+
 // UpdatedProtectionStatus updates protection state, if the protection was
 // disabled temporarily.  Returns the updated state of protection.
-func (s *Server) UpdatedProtectionStatus() (enabled bool) {
+func (s *Server) UpdatedProtectionStatus() (enabled bool, disabledUntil *time.Time) {
 	s.serverLock.RLock()
 	defer s.serverLock.RUnlock()
 
-	disabledUntil := s.conf.ProtectionDisabledUntil
+	enabled, disabledUntil = s.dnsFilter.ProtectionStatus()
 	if disabledUntil == nil {
-		return s.conf.ProtectionEnabled
+		return enabled, nil
 	}
 
 	if time.Now().Before(*disabledUntil) {
-		return false
+		return false, disabledUntil
 	}
 
 	// Update the values in a separate goroutine, unless an update is already in
@@ -671,7 +720,7 @@ func (s *Server) UpdatedProtectionStatus() (enabled bool) {
 		go s.enableProtectionAfterPause()
 	}
 
-	return true
+	return true, nil
 }
 
 // enableProtectionAfterPause sets the protection configuration to enabled
@@ -686,8 +735,7 @@ func (s *Server) enableProtectionAfterPause() {
 	s.serverLock.Lock()
 	defer s.serverLock.Unlock()
 
-	s.conf.ProtectionEnabled = true
-	s.conf.ProtectionDisabledUntil = nil
+	s.dnsFilter.SetProtectionStatus(true, nil)
 
 	log.Info("dns: protection is restarted after pause")
 }

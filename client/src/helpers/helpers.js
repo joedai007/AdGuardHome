@@ -27,6 +27,7 @@ import {
     SPECIAL_FILTER_ID,
     THEMES,
 } from './constants';
+import { LOCAL_STORAGE_KEYS, LocalStorageHelper } from './localStorageHelper';
 
 /**
  * @param time {string} The time to format
@@ -680,18 +681,35 @@ export const setHtmlLangAttr = (language) => {
 };
 
 /**
+ * Set local storage theme field
+ *
+ * @param {string} theme
+ */
+export const setTheme = (theme) => {
+    LocalStorageHelper.setItem(LOCAL_STORAGE_KEYS.THEME, theme);
+};
+
+/**
+ * Get local storage theme field
+ *
+ * @returns {string}
+ */
+
+export const getTheme = () => LocalStorageHelper.getItem(LOCAL_STORAGE_KEYS.THEME) || THEMES.light;
+
+/**
  * Sets UI theme.
  *
  * @param theme
  */
 export const setUITheme = (theme) => {
-    let currentTheme = theme;
+    let currentTheme = theme || getTheme();
 
     if (currentTheme === THEMES.auto) {
         const prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
         currentTheme = prefersDark ? THEMES.dark : THEMES.light;
     }
-
+    setTheme(currentTheme);
     document.body.dataset.theme = currentTheme;
 };
 
@@ -802,7 +820,6 @@ export const sortIp = (a, b) => {
         return 0;
     }
 };
-
 
 /**
  * @param {number} filterId

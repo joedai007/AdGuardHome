@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/AdguardTeam/AdGuardHome/internal/dhcpsvc"
 	"github.com/insomniacslk/dhcp/dhcpv6"
 	"github.com/insomniacslk/dhcp/iana"
 	"github.com/stretchr/testify/assert"
@@ -28,7 +29,7 @@ func TestV6_AddRemove_static(t *testing.T) {
 	require.Empty(t, s.GetLeases(LeasesStatic))
 
 	// Add static lease.
-	l := &Lease{
+	l := &dhcpsvc.Lease{
 		IP:     netip.MustParseAddr("2001::1"),
 		HWAddr: net.HardwareAddr{0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA},
 	}
@@ -44,10 +45,10 @@ func TestV6_AddRemove_static(t *testing.T) {
 
 	assert.Equal(t, l.IP, ls[0].IP)
 	assert.Equal(t, l.HWAddr, ls[0].HWAddr)
-	assert.EqualValues(t, leaseExpireStatic, ls[0].Expiry.Unix())
+	assert.True(t, ls[0].IsStatic)
 
 	// Try to remove non-existent static lease.
-	err = s.RemoveStaticLease(&Lease{
+	err = s.RemoveStaticLease(&dhcpsvc.Lease{
 		IP:     netip.MustParseAddr("2001::2"),
 		HWAddr: l.HWAddr,
 	})
@@ -72,7 +73,7 @@ func TestV6_AddReplace(t *testing.T) {
 	require.True(t, ok)
 
 	// Add dynamic leases.
-	dynLeases := []*Lease{{
+	dynLeases := []*dhcpsvc.Lease{{
 		IP:     netip.MustParseAddr("2001::1"),
 		HWAddr: net.HardwareAddr{0x11, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA},
 	}, {
@@ -84,7 +85,7 @@ func TestV6_AddReplace(t *testing.T) {
 		s.addLease(l)
 	}
 
-	stLeases := []*Lease{{
+	stLeases := []*dhcpsvc.Lease{{
 		IP:     netip.MustParseAddr("2001::1"),
 		HWAddr: net.HardwareAddr{0x33, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA},
 	}, {
@@ -103,7 +104,7 @@ func TestV6_AddReplace(t *testing.T) {
 	for i, l := range ls {
 		assert.Equal(t, stLeases[i].IP, l.IP)
 		assert.Equal(t, stLeases[i].HWAddr, l.HWAddr)
-		assert.EqualValues(t, leaseExpireStatic, l.Expiry.Unix())
+		assert.True(t, l.IsStatic)
 	}
 }
 
@@ -121,13 +122,12 @@ func TestV6GetLease(t *testing.T) {
 
 	dnsAddr := net.ParseIP("2000::1")
 	s.conf.dnsIPAddrs = []net.IP{dnsAddr}
-	s.sid = dhcpv6.Duid{
-		Type:          dhcpv6.DUID_LLT,
-		HwType:        iana.HWTypeEthernet,
+	s.sid = &dhcpv6.DUIDLL{
+		HWType:        iana.HWTypeEthernet,
 		LinkLayerAddr: net.HardwareAddr{0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA},
 	}
 
-	l := &Lease{
+	l := &dhcpsvc.Lease{
 		IP:     netip.MustParseAddr("2001::1"),
 		HWAddr: net.HardwareAddr{0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA},
 	}
@@ -216,9 +216,8 @@ func TestV6GetDynamicLease(t *testing.T) {
 
 	dnsAddr := net.ParseIP("2000::1")
 	s.conf.dnsIPAddrs = []net.IP{dnsAddr}
-	s.sid = dhcpv6.Duid{
-		Type:          dhcpv6.DUID_LLT,
-		HwType:        iana.HWTypeEthernet,
+	s.sid = &dhcpv6.DUIDLL{
+		HWType:        iana.HWTypeEthernet,
 		LinkLayerAddr: net.HardwareAddr{0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA},
 	}
 
@@ -326,8 +325,7 @@ func TestV6_FindMACbyIP(t *testing.T) {
 	anotherMAC := net.HardwareAddr{0xBB, 0xBB, 0xBB, 0xBB, 0xBB, 0xBB}
 
 	s := &v6Server{
-		leases: []*Lease{{
-			Expiry:   time.Unix(leaseExpireStatic, 0),
+		leases: []*dhcpsvc.Lease{{
 			Hostname: staticName,
 			HWAddr:   staticMAC,
 			IP:       staticIP,
@@ -340,8 +338,7 @@ func TestV6_FindMACbyIP(t *testing.T) {
 		}},
 	}
 
-	s.leases = []*Lease{{
-		Expiry:   time.Unix(leaseExpireStatic, 0),
+	s.leases = []*dhcpsvc.Lease{{
 		Hostname: staticName,
 		HWAddr:   staticMAC,
 		IP:       staticIP,

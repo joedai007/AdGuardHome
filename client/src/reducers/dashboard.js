@@ -44,6 +44,19 @@ const dashboard = handleActions(
 
             return newState;
         },
+        [actions.timerStatusSuccess]: (state, { payload }) => {
+            const {
+                protection_enabled: protectionEnabled,
+                protection_disabled_duration: protectionDisabledDuration,
+            } = payload;
+            const newState = {
+                ...state,
+                protectionEnabled,
+                protectionDisabledDuration,
+            };
+
+            return newState;
+        },
 
         [actions.getVersionRequest]: (state) => ({
             ...state,
@@ -177,7 +190,7 @@ const dashboard = handleActions(
         autoClients: [],
         supportedTags: [],
         name: '',
-        theme: 'auto',
+        theme: undefined,
         checkUpdateFlag: false,
     },
 );

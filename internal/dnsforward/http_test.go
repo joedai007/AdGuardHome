@@ -13,11 +13,14 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/fstest"
 	"time"
 
 	"github.com/AdguardTeam/AdGuardHome/internal/aghhttp"
 	"github.com/AdguardTeam/AdGuardHome/internal/aghnet"
+	"github.com/AdguardTeam/AdGuardHome/internal/aghtest"
 	"github.com/AdguardTeam/AdGuardHome/internal/filtering"
+	"github.com/AdguardTeam/dnsproxy/upstream"
 	"github.com/AdguardTeam/golibs/httphdr"
 	"github.com/AdguardTeam/golibs/netutil"
 	"github.com/AdguardTeam/golibs/testutil"
@@ -26,17 +29,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// fakeSystemResolvers is a mock aghnet.SystemResolvers implementation for
-// tests.
-type fakeSystemResolvers struct {
-	// SystemResolvers is embedded here simply to make *fakeSystemResolvers
-	// an aghnet.SystemResolvers without actually implementing all methods.
-	aghnet.SystemResolvers
-}
+// emptySysResolvers is an empty [SystemResolvers] implementation that always
+// returns nil.
+type emptySysResolvers struct{}
 
-// Get implements the aghnet.SystemResolvers interface for *fakeSystemResolvers.
-// It always returns nil.
-func (fsr *fakeSystemResolvers) Get() (rs []string) {
+// Addrs implements the aghnet.SystemResolvers interface for emptySysResolvers.
+func (emptySysResolvers) Addrs() (addrs []netip.AddrPort) {
 	return nil
 }
 
@@ -52,10 +50,18 @@ func loadTestData(t *testing.T, casesFileName string, cases any) {
 	require.NoError(t, err)
 }
 
-const jsonExt = ".json"
+const (
+	jsonExt = ".json"
+
+	// testBlockedRespTTL is the TTL for blocked responses to use in tests.
+	testBlockedRespTTL = 10
+)
 
 func TestDNSForwardHTTP_handleGetConfig(t *testing.T) {
 	filterConf := &filtering.Config{
+		ProtectionEnabled:     true,
+		BlockingMode:          filtering.BlockingModeDefault,
+		BlockedResponseTTL:    testBlockedRespTTL,
 		SafeBrowsingEnabled:   true,
 		SafeBrowsingCacheSize: 1000,
 		SafeSearchConf:        filtering.SafeSearchConfig{Enabled: true},
@@ -66,16 +72,18 @@ func TestDNSForwardHTTP_handleGetConfig(t *testing.T) {
 	forwardConf := ServerConfig{
 		UDPListenAddrs: []*net.UDPAddr{},
 		TCPListenAddrs: []*net.TCPAddr{},
-		FilteringConfig: FilteringConfig{
-			ProtectionEnabled: true,
-			BlockingMode:      BlockingModeDefault,
-			UpstreamDNS:       []string{"8.8.8.8:53", "8.8.4.4:53"},
-			EDNSClientSubnet:  &EDNSClientSubnet{Enabled: false},
+		Config: Config{
+			UpstreamDNS:            []string{"8.8.8.8:53", "8.8.4.4:53"},
+			FallbackDNS:            []string{"9.9.9.10"},
+			RatelimitSubnetLenIPv4: 24,
+			RatelimitSubnetLenIPv6: 56,
+			EDNSClientSubnet:       &EDNSClientSubnet{Enabled: false},
 		},
 		ConfigModified: func() {},
+		ServePlainDNS:  true,
 	}
 	s := createTestServer(t, filterConf, forwardConf, nil)
-	s.sysResolvers = &fakeSystemResolvers{}
+	s.sysResolvers = &emptySysResolvers{}
 
 	require.NoError(t, s.Start())
 	testutil.CleanupAndRequireSuccess(t, s.Stop)
@@ -132,6 +140,9 @@ func TestDNSForwardHTTP_handleGetConfig(t *testing.T) {
 
 func TestDNSForwardHTTP_handleSetConfig(t *testing.T) {
 	filterConf := &filtering.Config{
+		ProtectionEnabled:     true,
+		BlockingMode:          filtering.BlockingModeDefault,
+		BlockedResponseTTL:    testBlockedRespTTL,
 		SafeBrowsingEnabled:   true,
 		SafeBrowsingCacheSize: 1000,
 		SafeSearchConf:        filtering.SafeSearchConfig{Enabled: true},
@@ -142,16 +153,17 @@ func TestDNSForwardHTTP_handleSetConfig(t *testing.T) {
 	forwardConf := ServerConfig{
 		UDPListenAddrs: []*net.UDPAddr{},
 		TCPListenAddrs: []*net.TCPAddr{},
-		FilteringConfig: FilteringConfig{
-			ProtectionEnabled: true,
-			BlockingMode:      BlockingModeDefault,
-			UpstreamDNS:       []string{"8.8.8.8:53", "8.8.4.4:53"},
-			EDNSClientSubnet:  &EDNSClientSubnet{Enabled: false},
+		Config: Config{
+			UpstreamDNS:            []string{"8.8.8.8:53", "8.8.4.4:53"},
+			RatelimitSubnetLenIPv4: 24,
+			RatelimitSubnetLenIPv6: 56,
+			EDNSClientSubnet:       &EDNSClientSubnet{Enabled: false},
 		},
 		ConfigModified: func() {},
+		ServePlainDNS:  true,
 	}
 	s := createTestServer(t, filterConf, forwardConf, nil)
-	s.sysResolvers = &fakeSystemResolvers{}
+	s.sysResolvers = &emptySysResolvers{}
 
 	defaultConf := s.conf
 
@@ -174,11 +186,18 @@ func TestDNSForwardHTTP_handleSetConfig(t *testing.T) {
 		name:    "blocking_mode_good",
 		wantSet: "",
 	}, {
-		name:    "blocking_mode_bad",
-		wantSet: "blocking_ipv4 must be set when blocking_mode is custom_ip",
+		name: "blocking_mode_bad",
+		wantSet: "validating dns config: " +
+			"blocking_ipv4 must be valid ipv4 on custom_ip blocking_mode",
 	}, {
 		name:    "ratelimit",
 		wantSet: "",
+	}, {
+		name:    "ratelimit_subnet_len",
+		wantSet: "",
+	}, {
+		name:    "ratelimit_whitelist_not_ip",
+		wantSet: `decoding request: ParseAddr("not.ip"): unexpected character (at "not.ip")`,
 	}, {
 		name:    "edns_cs_enabled",
 		wantSet: "",
@@ -201,27 +220,38 @@ func TestDNSForwardHTTP_handleSetConfig(t *testing.T) {
 		name:    "upstream_mode_fastest_addr",
 		wantSet: "",
 	}, {
-		name:    "upstream_dns_bad",
-		wantSet: `validating upstream servers: validating upstream "!!!": not an ip:port`,
+		name: "upstream_dns_bad",
+		wantSet: `validating dns config: ` +
+			`upstream servers: validating upstream "!!!": not an ip:port`,
 	}, {
 		name: "bootstraps_bad",
-		wantSet: `checking bootstrap a: invalid address: ` +
-			`Resolver a is not eligible to be a bootstrap DNS server`,
+		wantSet: `validating dns config: checking bootstrap a: invalid address: not a bootstrap: ` +
+			`ParseAddr("a"): unable to parse IP`,
 	}, {
 		name:    "cache_bad_ttl",
-		wantSet: `cache_ttl_min must be less or equal than cache_ttl_max`,
+		wantSet: `validating dns config: cache_ttl_min must be less or equal than cache_ttl_max`,
 	}, {
 		name:    "upstream_mode_bad",
-		wantSet: `upstream_mode: incorrect value`,
+		wantSet: `validating dns config: upstream_mode: incorrect value "somethingelse"`,
 	}, {
 		name:    "local_ptr_upstreams_good",
 		wantSet: "",
 	}, {
 		name: "local_ptr_upstreams_bad",
-		wantSet: `validating private upstream servers: checking domain-specific upstreams: ` +
+		wantSet: `validating dns config: ` +
+			`private upstream servers: checking domain-specific upstreams: ` +
 			`bad arpa domain name "non.arpa.": not a reversed ip network`,
 	}, {
 		name:    "local_ptr_upstreams_null",
+		wantSet: "",
+	}, {
+		name:    "fallbacks",
+		wantSet: "",
+	}, {
+		name:    "blocked_response_ttl",
+		wantSet: "",
+	}, {
+		name:    "multiple_domain_specific_upstreams",
 		wantSet: "",
 	}}
 
@@ -241,8 +271,10 @@ func TestDNSForwardHTTP_handleSetConfig(t *testing.T) {
 
 		t.Run(tc.name, func(t *testing.T) {
 			t.Cleanup(func() {
+				s.dnsFilter.SetBlockingMode(filtering.BlockingModeDefault, netip.Addr{}, netip.Addr{})
 				s.conf = defaultConf
-				s.conf.FilteringConfig.EDNSClientSubnet = &EDNSClientSubnet{}
+				s.conf.Config.EDNSClientSubnet = &EDNSClientSubnet{}
+				s.dnsFilter.SetBlockedResponseTTL(testBlockedRespTTL)
 			})
 
 			rBody := io.NopCloser(bytes.NewReader(caseData.Req))
@@ -280,6 +312,10 @@ func TestIsCommentOrEmpty(t *testing.T) {
 }
 
 func TestValidateUpstreams(t *testing.T) {
+	const sdnsStamp = `sdns://AQMAAAAAAAAAFDE3Ni4xMDMuMTMwLjEzMDo1NDQzINErR_J` +
+		`S3PLCu_iZEIbq95zkSV2LFsigxDIuUso_OQhzIjIuZG5zY3J5cHQuZGVmYXVsdC5uczE` +
+		`uYWRndWFyZC5jb20`
+
 	testCases := []struct {
 		name    string
 		wantErr string
@@ -300,7 +336,7 @@ func TestValidateUpstreams(t *testing.T) {
 			"[//]tls://1.1.1.1",
 			"[/www.host.com/]#",
 			"[/host.com/google.com/]8.8.8.8",
-			"[/host/]sdns://AQMAAAAAAAAAFDE3Ni4xMDMuMTMwLjEzMDo1NDQzINErR_JS3PLCu_iZEIbq95zkSV2LFsigxDIuUso_OQhzIjIuZG5zY3J5cHQuZGVmYXVsdC5uczEuYWRndWFyZC5jb20",
+			"[/host/]" + sdnsStamp,
 		},
 	}, {
 		name:    "with_default",
@@ -310,7 +346,7 @@ func TestValidateUpstreams(t *testing.T) {
 			"[//]tls://1.1.1.1",
 			"[/www.host.com/]#",
 			"[/host.com/google.com/]8.8.8.8",
-			"[/host/]sdns://AQMAAAAAAAAAFDE3Ni4xMDMuMTMwLjEzMDo1NDQzINErR_JS3PLCu_iZEIbq95zkSV2LFsigxDIuUso_OQhzIjIuZG5zY3J5cHQuZGVmYXVsdC5uczEuYWRndWFyZC5jb20",
+			"[/host/]" + sdnsStamp,
 			"8.8.8.8",
 		},
 	}, {
@@ -326,9 +362,10 @@ func TestValidateUpstreams(t *testing.T) {
 		wantErr: `validating upstream "123.3.7m": not an ip:port`,
 		set:     []string{"123.3.7m"},
 	}, {
-		name:    "invalid",
-		wantErr: `bad upstream for domain "[/host.com]tls://dns.adguard.com": missing separator`,
-		set:     []string{"[/host.com]tls://dns.adguard.com"},
+		name: "invalid",
+		wantErr: `splitting upstream line "[/host.com]tls://dns.adguard.com": ` +
+			`missing separator`,
+		set: []string{"[/host.com]tls://dns.adguard.com"},
 	}, {
 		name:    "invalid",
 		wantErr: `validating upstream "[host.ru]#": not an ip:port`,
@@ -340,19 +377,19 @@ func TestValidateUpstreams(t *testing.T) {
 			"1.1.1.1",
 			"tls://1.1.1.1",
 			"https://dns.adguard.com/dns-query",
-			"sdns://AQMAAAAAAAAAFDE3Ni4xMDMuMTMwLjEzMDo1NDQzINErR_JS3PLCu_iZEIbq95zkSV2LFsigxDIuUso_OQhzIjIuZG5zY3J5cHQuZGVmYXVsdC5uczEuYWRndWFyZC5jb20",
+			sdnsStamp,
 			"udp://dns.google",
 			"udp://8.8.8.8",
 			"[/host.com/]1.1.1.1",
 			"[//]tls://1.1.1.1",
 			"[/www.host.com/]#",
 			"[/host.com/google.com/]8.8.8.8",
-			"[/host/]sdns://AQMAAAAAAAAAFDE3Ni4xMDMuMTMwLjEzMDo1NDQzINErR_JS3PLCu_iZEIbq95zkSV2LFsigxDIuUso_OQhzIjIuZG5zY3J5cHQuZGVmYXVsdC5uczEuYWRndWFyZC5jb20",
+			"[/host/]" + sdnsStamp,
 			"[/пример.рф/]8.8.8.8",
 		},
 	}, {
 		name: "bad_domain",
-		wantErr: `bad upstream for domain "[/!/]8.8.8.8": domain at index 0: ` +
+		wantErr: `splitting upstream line "[/!/]8.8.8.8": domain at index 0: ` +
 			`bad domain name "!": bad top-level domain name label "!": ` +
 			`bad top-level domain name label rune '!'`,
 		set: []string{"[/!/]8.8.8.8"},
@@ -398,9 +435,9 @@ func TestValidateUpstreamsPrivate(t *testing.T) {
 		u: "[/128.in-addr.arpa/]#",
 	}, {
 		name: "several_bad",
-		wantErr: `checking domain-specific upstreams: 2 errors: ` +
-			`"arpa domain \"1.2.3.4.in-addr.arpa.\" should point to a locally-served network", ` +
-			`"bad arpa domain name \"non.arpa.\": not a reversed ip network"`,
+		wantErr: `checking domain-specific upstreams: ` +
+			`arpa domain "1.2.3.4.in-addr.arpa." should point to a locally-served network` + "\n" +
+			`bad arpa domain name "non.arpa.": not a reversed ip network`,
 		u: "[/non.arpa/1.2.3.4.in-addr.arpa/127.in-addr.arpa/]#",
 	}, {
 		name:    "partial_good",
@@ -418,55 +455,79 @@ func TestValidateUpstreamsPrivate(t *testing.T) {
 	}
 }
 
-func newLocalUpstreamListener(t *testing.T, port int, handler dns.Handler) (real net.Addr) {
+func newLocalUpstreamListener(t *testing.T, port uint16, handler dns.Handler) (real netip.AddrPort) {
+	t.Helper()
+
 	startCh := make(chan struct{})
 	upsSrv := &dns.Server{
-		Addr:              netip.AddrPortFrom(netutil.IPv4Localhost(), uint16(port)).String(),
+		Addr:              netip.AddrPortFrom(netutil.IPv4Localhost(), port).String(),
 		Net:               "tcp",
 		Handler:           handler,
 		NotifyStartedFunc: func() { close(startCh) },
 	}
 	go func() {
-		t := testutil.PanicT{}
-
 		err := upsSrv.ListenAndServe()
-		require.NoError(t, err)
+		require.NoError(testutil.PanicT{}, err)
 	}()
+
 	<-startCh
 	testutil.CleanupAndRequireSuccess(t, upsSrv.Shutdown)
 
-	return upsSrv.Listener.Addr()
+	return testutil.RequireTypeAssert[*net.TCPAddr](t, upsSrv.Listener.Addr()).AddrPort()
 }
 
-func TestServer_handleTestUpstreaDNS(t *testing.T) {
-	goodHandler := dns.HandlerFunc(func(w dns.ResponseWriter, m *dns.Msg) {
+func TestServer_HandleTestUpstreamDNS(t *testing.T) {
+	hdlr := dns.HandlerFunc(func(w dns.ResponseWriter, m *dns.Msg) {
 		err := w.WriteMsg(new(dns.Msg).SetReply(m))
 		require.NoError(testutil.PanicT{}, err)
 	})
-	badHandler := dns.HandlerFunc(func(w dns.ResponseWriter, _ *dns.Msg) {
-		err := w.WriteMsg(new(dns.Msg))
-		require.NoError(testutil.PanicT{}, err)
-	})
 
-	goodUps := (&url.URL{
+	ups := (&url.URL{
 		Scheme: "tcp",
-		Host:   newLocalUpstreamListener(t, 0, goodHandler).String(),
-	}).String()
-	badUps := (&url.URL{
-		Scheme: "tcp",
-		Host:   newLocalUpstreamListener(t, 0, badHandler).String(),
+		Host:   newLocalUpstreamListener(t, 0, hdlr).String(),
 	}).String()
 
-	const upsTimeout = 100 * time.Millisecond
+	const (
+		upsTimeout = 100 * time.Millisecond
 
-	srv := createTestServer(t, &filtering.Config{}, ServerConfig{
+		hostsFileName = "hosts"
+		upstreamHost  = "custom.localhost"
+	)
+
+	hostsListener := newLocalUpstreamListener(t, 0, hdlr)
+	hostsUps := (&url.URL{
+		Scheme: "tcp",
+		Host:   netutil.JoinHostPort(upstreamHost, hostsListener.Port()),
+	}).String()
+
+	hc, err := aghnet.NewHostsContainer(
+		fstest.MapFS{
+			hostsFileName: &fstest.MapFile{
+				Data: []byte(hostsListener.Addr().String() + " " + upstreamHost),
+			},
+		},
+		&aghtest.FSWatcher{
+			OnEvents: func() (e <-chan struct{}) { return nil },
+			OnAdd:    func(_ string) (err error) { return nil },
+			OnClose:  func() (err error) { return nil },
+		},
+		hostsFileName,
+	)
+	require.NoError(t, err)
+
+	srv := createTestServer(t, &filtering.Config{
+		BlockingMode: filtering.BlockingModeDefault,
+		EtcHosts:     hc,
+	}, ServerConfig{
 		UDPListenAddrs:  []*net.UDPAddr{{}},
 		TCPListenAddrs:  []*net.TCPAddr{{}},
 		UpstreamTimeout: upsTimeout,
-		FilteringConfig: FilteringConfig{
+		Config: Config{
 			EDNSClientSubnet: &EDNSClientSubnet{Enabled: false},
 		},
+		ServePlainDNS: true,
 	}, nil)
+	srv.etcHosts = upstream.NewHostsResolver(hc)
 	startDeferStop(t, srv)
 
 	testCases := []struct {
@@ -475,40 +536,32 @@ func TestServer_handleTestUpstreaDNS(t *testing.T) {
 		name     string
 	}{{
 		body: map[string]any{
-			"upstream_dns": []string{goodUps},
+			"upstream_dns": []string{hostsUps},
 		},
 		wantResp: map[string]any{
-			goodUps: "OK",
+			hostsUps: "OK",
 		},
-		name: "success",
+		name: "etc_hosts",
 	}, {
 		body: map[string]any{
-			"upstream_dns": []string{badUps},
+			"upstream_dns": []string{ups, "#this.is.comment"},
 		},
 		wantResp: map[string]any{
-			badUps: `upstream "` + badUps + `" fails to exchange: ` +
-				`couldn't communicate with upstream: dns: id mismatch`,
+			ups: "OK",
 		},
-		name: "broken",
-	}, {
-		body: map[string]any{
-			"upstream_dns": []string{goodUps, badUps},
-		},
-		wantResp: map[string]any{
-			goodUps: "OK",
-			badUps: `upstream "` + badUps + `" fails to exchange: ` +
-				`couldn't communicate with upstream: dns: id mismatch`,
-		},
-		name: "both",
+		name: "comment_mix",
 	}}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			reqBody, err := json.Marshal(tc.body)
+			var reqBody []byte
+			reqBody, err = json.Marshal(tc.body)
 			require.NoError(t, err)
 
 			w := httptest.NewRecorder()
-			r, err := http.NewRequest(http.MethodPost, "", bytes.NewReader(reqBody))
+
+			var r *http.Request
+			r, err = http.NewRequest(http.MethodPost, "", bytes.NewReader(reqBody))
 			require.NoError(t, err)
 
 			srv.handleTestUpstreamDNS(w, r)
@@ -536,11 +589,15 @@ func TestServer_handleTestUpstreaDNS(t *testing.T) {
 		req := map[string]any{
 			"upstream_dns": []string{sleepyUps},
 		}
-		reqBody, err := json.Marshal(req)
+
+		var reqBody []byte
+		reqBody, err = json.Marshal(req)
 		require.NoError(t, err)
 
 		w := httptest.NewRecorder()
-		r, err := http.NewRequest(http.MethodPost, "", bytes.NewReader(reqBody))
+
+		var r *http.Request
+		r, err = http.NewRequest(http.MethodPost, "", bytes.NewReader(reqBody))
 		require.NoError(t, err)
 
 		srv.handleTestUpstreamDNS(w, r)

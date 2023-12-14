@@ -24,6 +24,7 @@ CHANNEL = development
 CLIENT_DIR = client
 COMMIT = $$( git rev-parse --short HEAD )
 DIST_DIR = dist
+GOAMD64 = v1
 GOPROXY = https://goproxy.cn|https://proxy.golang.org|direct
 GOSUMDB = sum.golang.google.cn
 GPG_KEY = devteam@adguard.com
@@ -61,6 +62,7 @@ ENV = env\
 	GPG_KEY_PASSPHRASE='$(GPG_KEY_PASSPHRASE)'\
 	DIST_DIR='$(DIST_DIR)'\
 	GO="$(GO.MACRO)"\
+	GOAMD64="$(GOAMD64)"\
 	GOPROXY='$(GOPROXY)'\
 	GOSUMDB='$(GOSUMDB)'\
 	PATH="$${PWD}/bin:$$( "$(GO.MACRO)" env GOPATH )/bin:$${PATH}"\
@@ -78,7 +80,7 @@ build: deps quick-build
 
 quick-build: js-build go-build
 
-ci: deps test
+ci: deps test go-bench go-fuzz
 
 deps: js-deps go-deps
 lint: js-lint go-lint
@@ -104,8 +106,10 @@ js-deps:
 js-lint: ; $(NPM) $(NPM_FLAGS) run lint
 js-test: ; $(NPM) $(NPM_FLAGS) run test
 
+go-bench: ; $(ENV) "$(SHELL)" ./scripts/make/go-bench.sh
 go-build: ; $(ENV) "$(SHELL)" ./scripts/make/go-build.sh
 go-deps:  ; $(ENV) "$(SHELL)" ./scripts/make/go-deps.sh
+go-fuzz:  ; $(ENV) "$(SHELL)" ./scripts/make/go-fuzz.sh
 go-lint:  ; $(ENV) "$(SHELL)" ./scripts/make/go-lint.sh
 go-tools: ; $(ENV) "$(SHELL)" ./scripts/make/go-tools.sh
 
@@ -128,3 +132,10 @@ openapi-lint: ; cd ./openapi/ && $(YARN) test
 openapi-show: ; cd ./openapi/ && $(YARN) start
 
 txt-lint: ; $(ENV) "$(SHELL)" ./scripts/make/txt-lint.sh
+
+# TODO(a.garipov): Consider adding to scripts/ and the common project
+# structure.
+go-upd-tools:
+	cd ./internal/tools/ &&\
+		"$(GO.MACRO)" get -u &&\
+		"$(GO.MACRO)" mod tidy

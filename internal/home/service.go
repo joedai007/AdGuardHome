@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
-	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -34,8 +33,13 @@ const (
 // daemon.
 type program struct {
 	clientBuildFS fs.FS
+	signals       chan os.Signal
+	done          chan struct{}
 	opts          options
 }
+
+// type check
+var _ service.Interface = (*program)(nil)
 
 // Start implements service.Interface interface for *program.
 func (p *program) Start(_ service.Service) (err error) {
@@ -43,19 +47,19 @@ func (p *program) Start(_ service.Service) (err error) {
 	args := p.opts
 	args.runningAsService = true
 
-	go run(args, p.clientBuildFS)
+	go run(args, p.clientBuildFS, p.done)
 
 	return nil
 }
 
 // Stop implements service.Interface interface for *program.
-func (p *program) Stop(_ service.Service) error {
-	// Stop should not block.  Return with a few seconds.
-	if Context.appSignalChannel == nil {
-		os.Exit(0)
-	}
+func (p *program) Stop(_ service.Service) (err error) {
+	log.Info("service: stopping: waiting for cleanup")
 
-	Context.appSignalChannel <- syscall.SIGINT
+	aghos.SendShutdownSignal(p.signals)
+
+	// Wait for other goroutines to complete their job.
+	<-p.done
 
 	return nil
 }
@@ -84,14 +88,9 @@ func svcStatus(s service.Service) (status service.Status, err error) {
 // On OpenWrt, the service utility may not exist.  We use our service script
 // directly in this case.
 func svcAction(s service.Service, action string) (err error) {
-	if runtime.GOOS == "darwin" && action == "start" {
-		var exe string
-		if exe, err = os.Executable(); err != nil {
-			log.Error("starting service: getting executable path: %s", err)
-		} else if exe, err = filepath.EvalSymlinks(exe); err != nil {
-			log.Error("starting service: evaluating executable symlinks: %s", err)
-		} else if !strings.HasPrefix(exe, "/Applications/") {
-			log.Info("warning: service must be started from within the /Applications directory")
+	if action == "start" {
+		if err = aghos.PreCheckActionStart(); err != nil {
+			log.Error("starting service: %s", err)
 		}
 	}
 
@@ -99,8 +98,6 @@ func svcAction(s service.Service, action string) (err error) {
 	if err != nil && service.Platform() == "unix-systemv" &&
 		(action == "start" || action == "stop" || action == "restart") {
 		_, err = runInitdCommand(action)
-
-		return err
 	}
 
 	return err
@@ -202,7 +199,12 @@ func restartService() (err error) {
 //   - run:  This is a special command that is not supposed to be used directly
 //     it is specified when we register a service, and it indicates to the app
 //     that it is being run as a service/daemon.
-func handleServiceControlAction(opts options, clientBuildFS fs.FS) {
+func handleServiceControlAction(
+	opts options,
+	clientBuildFS fs.FS,
+	signals chan os.Signal,
+	done chan struct{},
+) {
 	// Call chooseSystem explicitly to introduce OpenBSD support for service
 	// package.  It's a noop for other GOOS values.
 	chooseSystem()
@@ -224,6 +226,7 @@ func handleServiceControlAction(opts options, clientBuildFS fs.FS) {
 
 	runOpts := opts
 	runOpts.serviceControlAction = "run"
+
 	svcConfig := &service.Config{
 		Name:             serviceName,
 		DisplayName:      serviceDisplayName,
@@ -233,35 +236,53 @@ func handleServiceControlAction(opts options, clientBuildFS fs.FS) {
 	}
 	configureService(svcConfig)
 
-	prg := &program{
+	s, err := service.New(&program{
 		clientBuildFS: clientBuildFS,
+		signals:       signals,
+		done:          done,
 		opts:          runOpts,
-	}
-	var s service.Service
-	if s, err = service.New(prg, svcConfig); err != nil {
+	}, svcConfig)
+	if err != nil {
 		log.Fatalf("service: initializing service: %s", err)
 	}
 
+	err = handleServiceCommand(s, action, opts)
+	if err != nil {
+		log.Fatalf("service: %s", err)
+	}
+
+	log.Printf(
+		"service: action %s has been done successfully on %s",
+		action,
+		service.ChosenSystem(),
+	)
+}
+
+// handleServiceCommand handles service command.
+func handleServiceCommand(s service.Service, action string, opts options) (err error) {
 	switch action {
 	case "status":
 		handleServiceStatusCommand(s)
 	case "run":
 		if err = s.Run(); err != nil {
-			log.Fatalf("service: failed to run service: %s", err)
+			return fmt.Errorf("failed to run service: %w", err)
 		}
 	case "install":
 		initConfigFilename(opts)
-		initWorkingDir(opts)
+		if err = initWorkingDir(opts); err != nil {
+			return fmt.Errorf("failed to init working dir: %w", err)
+		}
+
 		handleServiceInstallCommand(s)
 	case "uninstall":
 		handleServiceUninstallCommand(s)
 	default:
 		if err = svcAction(s, action); err != nil {
-			log.Fatalf("service: executing action %q: %s", action, err)
+			return fmt.Errorf("executing action %q: %w", action, err)
 		}
 	}
 
-	log.Printf("service: action %s has been done successfully on %s", action, service.ChosenSystem())
+	return nil
 }
 
 // handleServiceStatusCommand handles service "status" command.

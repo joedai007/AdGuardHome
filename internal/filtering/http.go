@@ -3,11 +3,12 @@ package filtering
 import (
 	"encoding/json"
 	"fmt"
-	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/AdguardTeam/AdGuardHome/internal/aghhttp"
@@ -94,7 +95,7 @@ func (d *DNSFilter) handleFilteringAddURL(w http.ResponseWriter, r *http.Request
 			r,
 			w,
 			http.StatusBadRequest,
-			"Couldn't fetch filter from url %s: %s",
+			"Couldn't fetch filter from URL %q: %s",
 			filt.URL,
 			err,
 		)
@@ -123,7 +124,7 @@ func (d *DNSFilter) handleFilteringAddURL(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	d.ConfigModified()
+	d.conf.ConfigModified()
 	d.EnableFilters(true)
 
 	_, err = fmt.Fprintf(w, "OK %d rules\n", filt.RulesCount)
@@ -148,12 +149,12 @@ func (d *DNSFilter) handleFilteringRemoveURL(w http.ResponseWriter, r *http.Requ
 
 	var deleted FilterYAML
 	func() {
-		d.filtersMu.Lock()
-		defer d.filtersMu.Unlock()
+		d.conf.filtersMu.Lock()
+		defer d.conf.filtersMu.Unlock()
 
-		filters := &d.Filters
+		filters := &d.conf.Filters
 		if req.Whitelist {
-			filters = &d.WhitelistFilters
+			filters = &d.conf.WhitelistFilters
 		}
 
 		delIdx := slices.IndexFunc(*filters, func(flt FilterYAML) bool {
@@ -166,9 +167,9 @@ func (d *DNSFilter) handleFilteringRemoveURL(w http.ResponseWriter, r *http.Requ
 		}
 
 		deleted = (*filters)[delIdx]
-		p := deleted.Path(d.DataDir)
+		p := deleted.Path(d.conf.DataDir)
 		err = os.Rename(p, p+".old")
-		if err != nil {
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
 			log.Error("deleting filter %d: renaming file %q: %s", deleted.ID, p, err)
 
 			return
@@ -179,7 +180,7 @@ func (d *DNSFilter) handleFilteringRemoveURL(w http.ResponseWriter, r *http.Requ
 		log.Info("deleted filter %d", deleted.ID)
 	}()
 
-	d.ConfigModified()
+	d.conf.ConfigModified()
 	d.EnableFilters(true)
 
 	// NOTE: The old files "filter.txt.old" aren't deleted.  It's not really
@@ -241,7 +242,7 @@ func (d *DNSFilter) handleFilteringSetURL(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	d.ConfigModified()
+	d.conf.ConfigModified()
 	if restart {
 		d.EnableFilters(true)
 	}
@@ -265,8 +266,8 @@ func (d *DNSFilter) handleFilteringSetRules(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	d.UserRules = req.Rules
-	d.ConfigModified()
+	d.conf.UserRules = req.Rules
+	d.conf.ConfigModified()
 	d.EnableFilters(true)
 }
 
@@ -300,7 +301,7 @@ func (d *DNSFilter) handleFilteringRefresh(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	_ = aghhttp.WriteJSONResponse(w, r, resp)
+	aghhttp.WriteJSONResponseOK(w, r, resp)
 }
 
 type filterJSON struct {
@@ -339,21 +340,21 @@ func filterToJSON(f FilterYAML) filterJSON {
 // Get filtering configuration
 func (d *DNSFilter) handleFilteringStatus(w http.ResponseWriter, r *http.Request) {
 	resp := filteringConfig{}
-	d.filtersMu.RLock()
-	resp.Enabled = d.FilteringEnabled
-	resp.Interval = d.FiltersUpdateIntervalHours
-	for _, f := range d.Filters {
+	d.conf.filtersMu.RLock()
+	resp.Enabled = d.conf.FilteringEnabled
+	resp.Interval = d.conf.FiltersUpdateIntervalHours
+	for _, f := range d.conf.Filters {
 		fj := filterToJSON(f)
 		resp.Filters = append(resp.Filters, fj)
 	}
-	for _, f := range d.WhitelistFilters {
+	for _, f := range d.conf.WhitelistFilters {
 		fj := filterToJSON(f)
 		resp.WhitelistFilters = append(resp.WhitelistFilters, fj)
 	}
-	resp.UserRules = d.UserRules
-	d.filtersMu.RUnlock()
+	resp.UserRules = d.conf.UserRules
+	d.conf.filtersMu.RUnlock()
 
-	_ = aghhttp.WriteJSONResponse(w, r, resp)
+	aghhttp.WriteJSONResponseOK(w, r, resp)
 }
 
 // Set filtering configuration
@@ -373,14 +374,14 @@ func (d *DNSFilter) handleFilteringConfig(w http.ResponseWriter, r *http.Request
 	}
 
 	func() {
-		d.filtersMu.Lock()
-		defer d.filtersMu.Unlock()
+		d.conf.filtersMu.Lock()
+		defer d.conf.filtersMu.Unlock()
 
-		d.FilteringEnabled = req.Enabled
-		d.FiltersUpdateIntervalHours = req.Interval
+		d.conf.FilteringEnabled = req.Enabled
+		d.conf.FiltersUpdateIntervalHours = req.Interval
 	}()
 
-	d.ConfigModified()
+	d.conf.ConfigModified()
 	d.EnableFilters(true)
 }
 
@@ -403,8 +404,8 @@ type checkHostResp struct {
 	SvcName string `json:"service_name"`
 
 	// for Rewrite:
-	CanonName string   `json:"cname"`    // CNAME value
-	IPList    []net.IP `json:"ip_addrs"` // list of IP addresses
+	CanonName string       `json:"cname"`    // CNAME value
+	IPList    []netip.Addr `json:"ip_addrs"` // list of IP addresses
 
 	// FilterID is the ID of the rule's filter list.
 	//
@@ -415,12 +416,12 @@ type checkHostResp struct {
 func (d *DNSFilter) handleCheckHost(w http.ResponseWriter, r *http.Request) {
 	host := r.URL.Query().Get("name")
 
-	setts := d.GetConfig()
+	setts := d.Settings()
 	setts.FilteringEnabled = true
 	setts.ProtectionEnabled = true
 
-	d.ApplyBlockedServices(&setts, nil)
-	result, err := d.CheckHost(host, dns.TypeA, &setts)
+	d.ApplyBlockedServices(setts)
+	result, err := d.CheckHost(host, dns.TypeA, setts)
 	if err != nil {
 		aghhttp.Error(
 			r,
@@ -455,12 +456,86 @@ func (d *DNSFilter) handleCheckHost(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	_ = aghhttp.WriteJSONResponse(w, r, resp)
+	aghhttp.WriteJSONResponseOK(w, r, resp)
+}
+
+// setProtectedBool sets the value of a boolean pointer under a lock.  l must
+// protect the value under ptr.
+//
+// TODO(e.burkov):  Make it generic?
+func setProtectedBool(mu *sync.RWMutex, ptr *bool, val bool) {
+	mu.Lock()
+	defer mu.Unlock()
+
+	*ptr = val
+}
+
+// protectedBool gets the value of a boolean pointer under a read lock.  l must
+// protect the value under ptr.
+//
+// TODO(e.burkov):  Make it generic?
+func protectedBool(mu *sync.RWMutex, ptr *bool) (val bool) {
+	mu.RLock()
+	defer mu.RUnlock()
+
+	return *ptr
+}
+
+// handleSafeBrowsingEnable is the handler for the POST
+// /control/safebrowsing/enable HTTP API.
+func (d *DNSFilter) handleSafeBrowsingEnable(w http.ResponseWriter, r *http.Request) {
+	setProtectedBool(d.confMu, &d.conf.SafeBrowsingEnabled, true)
+	d.conf.ConfigModified()
+}
+
+// handleSafeBrowsingDisable is the handler for the POST
+// /control/safebrowsing/disable HTTP API.
+func (d *DNSFilter) handleSafeBrowsingDisable(w http.ResponseWriter, r *http.Request) {
+	setProtectedBool(d.confMu, &d.conf.SafeBrowsingEnabled, false)
+	d.conf.ConfigModified()
+}
+
+// handleSafeBrowsingStatus is the handler for the GET
+// /control/safebrowsing/status HTTP API.
+func (d *DNSFilter) handleSafeBrowsingStatus(w http.ResponseWriter, r *http.Request) {
+	resp := &struct {
+		Enabled bool `json:"enabled"`
+	}{
+		Enabled: protectedBool(d.confMu, &d.conf.SafeBrowsingEnabled),
+	}
+
+	aghhttp.WriteJSONResponseOK(w, r, resp)
+}
+
+// handleParentalEnable is the handler for the POST /control/parental/enable
+// HTTP API.
+func (d *DNSFilter) handleParentalEnable(w http.ResponseWriter, r *http.Request) {
+	setProtectedBool(d.confMu, &d.conf.ParentalEnabled, true)
+	d.conf.ConfigModified()
+}
+
+// handleParentalDisable is the handler for the POST /control/parental/disable
+// HTTP API.
+func (d *DNSFilter) handleParentalDisable(w http.ResponseWriter, r *http.Request) {
+	setProtectedBool(d.confMu, &d.conf.ParentalEnabled, false)
+	d.conf.ConfigModified()
+}
+
+// handleParentalStatus is the handler for the GET /control/parental/status
+// HTTP API.
+func (d *DNSFilter) handleParentalStatus(w http.ResponseWriter, r *http.Request) {
+	resp := &struct {
+		Enabled bool `json:"enabled"`
+	}{
+		Enabled: protectedBool(d.confMu, &d.conf.ParentalEnabled),
+	}
+
+	aghhttp.WriteJSONResponseOK(w, r, resp)
 }
 
 // RegisterFilteringHandlers - register handlers
 func (d *DNSFilter) RegisterFilteringHandlers() {
-	registerHTTP := d.HTTPRegister
+	registerHTTP := d.conf.HTTPRegister
 	if registerHTTP == nil {
 		return
 	}
@@ -480,12 +555,18 @@ func (d *DNSFilter) RegisterFilteringHandlers() {
 
 	registerHTTP(http.MethodGet, "/control/rewrite/list", d.handleRewriteList)
 	registerHTTP(http.MethodPost, "/control/rewrite/add", d.handleRewriteAdd)
+	registerHTTP(http.MethodPut, "/control/rewrite/update", d.handleRewriteUpdate)
 	registerHTTP(http.MethodPost, "/control/rewrite/delete", d.handleRewriteDelete)
 
 	registerHTTP(http.MethodGet, "/control/blocked_services/services", d.handleBlockedServicesIDs)
 	registerHTTP(http.MethodGet, "/control/blocked_services/all", d.handleBlockedServicesAll)
+
+	// Deprecated handlers.
 	registerHTTP(http.MethodGet, "/control/blocked_services/list", d.handleBlockedServicesList)
 	registerHTTP(http.MethodPost, "/control/blocked_services/set", d.handleBlockedServicesSet)
+
+	registerHTTP(http.MethodGet, "/control/blocked_services/get", d.handleBlockedServicesGet)
+	registerHTTP(http.MethodPut, "/control/blocked_services/update", d.handleBlockedServicesUpdate)
 
 	registerHTTP(http.MethodGet, "/control/filtering/status", d.handleFilteringStatus)
 	registerHTTP(http.MethodPost, "/control/filtering/config", d.handleFilteringConfig)

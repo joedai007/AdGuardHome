@@ -4,6 +4,199 @@
 
 ## v0.108.0: API changes
 
+## v0.107.42: API changes
+
+### The new field `"serve_plain_dns"` in `TlsConfig`
+
+* The new field `"serve_plain_dns"` in `POST /control/tls/configure`,
+  `POST /control/tls/validate` and `GET /control/tls/status` is true if plain
+  DNS is allowed for incoming requests.
+
+### The new fields `"upstreams_cache_enabled"` and `"upstreams_cache_size"` in `Client` object
+
+* The new field `"upstreams_cache_enabled"` in `GET /control/clients`,
+  `GET /control/clients/find`, `POST /control/clients/add`, and
+  `POST /control/clients/update` methods shows if client's DNS cache is enabled
+  for the client.  If not set AdGuard Home will use default value (false).
+
+* The new field `"upstreams_cache_size"` in `GET /control/clients`,
+  `GET /control/clients/find`, `POST /control/clients/add`, and
+  `POST /control/clients/update` methods is the size of client's DNS cache in
+  bytes.
+
+### The new field `"ratelimit_subnet_len_ipv4"` in `DNSConfig` object
+
+* The new field `"ratelimit_subnet_len_ipv4"` in `GET /control/dns_info` and
+  `POST /control/dns_config` is the length of the subnet mask for IPv4
+  addresses.
+
+### The new field `"ratelimit_subnet_len_ipv6"` in `DNSConfig` object
+
+* The new field `"ratelimit_subnet_len_ipv6"` in `GET /control/dns_info` and
+  `POST /control/dns_config` is the length of the subnet mask for IPv6
+  addresses.
+
+### The new field `"ratelimit_whitelist"` in `DNSConfig` object
+
+* The new field `"blocked_response_ttl"` in `GET /control/dns_info` and `POST
+  /control/dns_config` is the list of IP addresses excluded from rate limiting.
+
+## v0.107.39: API changes
+
+### New HTTP API 'POST /control/dhcp/update_static_lease'
+
+* The new `POST /control/dhcp/update_static_lease` HTTP API allows modifying IP
+  address, hostname of the static DHCP lease.  IP version must be the same as
+  previous.
+
+### The new field `"blocked_response_ttl"` in `DNSConfig` object
+
+* The new field `"blocked_response_ttl"` in `GET /control/dns_info` and `POST
+  /control/dns_config` is the TTL for blocked responses.
+
+## v0.107.37: API changes
+
+### The new field `"fallback_dns"` in `UpstreamsConfig` object
+
+* The new field `"fallback_dns"` in `POST /control/test_upstream_dns` is the
+  list of fallback DNS servers to test.
+
+### The new field `"fallback_dns"` in `DNSConfig` object
+
+* The new field `"fallback_dns"` in `GET /control/dns_info` and `POST
+  /control/dns_config` is the list of fallback DNS servers used when upstream
+  DNS servers are not responding.
+
+### Deprecated blocked services APIs
+
+* The `GET /control/blocked_services/list` HTTP API; use the new `GET
+  /control/blocked_services/get` API instead.
+
+* The `POST /control/blocked_services/set` HTTP API; use the new `PUT
+  /control/blocked_services/update` API instead.
+
+### New blocked services APIs
+
+* The new `GET /control/blocked_services/get` HTTP API.
+
+* The new `PUT /control/blocked_services/update` HTTP API allows config
+  updates.
+
+These APIs accept and return a JSON object with the following format:
+
+```json
+{
+  "schedule": {
+    "time_zone": "Local",
+    "sun": {
+      "start": 46800000,
+      "end": 82800000
+    }
+  },
+  "ids": [
+    "vk"
+  ]
+}
+```
+
+### `/control/clients` HTTP APIs
+
+The following HTTP APIs have been changed:
+
+*  `GET /control/clients`;
+*  `GET /control/clients/find?ip0=...&ip1=...&ip2=...`;
+*  `POST /control/clients/add`;
+*  `POST /control/clients/update`;
+
+The new field `blocked_services_schedule` has been added to JSON objects.  It
+has the following format:
+
+```json
+{
+  "time_zone": "Local",
+  "sun": {
+    "start": 0,
+    "end": 86400000
+  },
+  "mon": {
+    "start": 60000,
+    "end": 82800000
+  },
+  "thu": {
+    "start": 120000,
+    "end": 79200000
+  },
+  "tue": {
+    "start": 180000,
+    "end": 75600000
+  },
+  "wed": {
+    "start": 240000,
+    "end": 72000000
+  },
+  "fri": {
+    "start": 300000,
+    "end": 68400000
+  },
+  "sat": {
+    "start": 360000,
+    "end": 64800000
+  }
+}
+```
+
+## v0.107.36: API changes
+
+### The new fields `"top_upstreams_responses"` and `"top_upstreams_avg_time"` in `Stats` object
+
+* The new field `"top_upstreams_responses"` in `GET /control/stats` method
+  shows the total number of responses from each upstream.
+
+* The new field `"top_upstrems_avg_time"` in `GET /control/stats` method shows
+  the average processing time in seconds of requests from each upstream.
+
+## v0.107.30: API changes
+
+### `POST /control/version.json` and `GET /control/dhcp/interfaces` content type
+
+* The value of the `Content-Type` header in the `POST /control/version.json` and
+  `GET /control/dhcp/interfaces` HTTP APIs is now correctly set to
+  `application/json` as opposed to `text/plain`.
+
+### New HTTP API 'PUT /control/rewrite/update'
+
+* The new `PUT /control/rewrite/update` HTTP API allows rewrite rule updates.
+  It accepts a JSON object with the following format:
+
+```json
+{
+  "target": {
+    "domain": "example.com",
+    "answer": "answer-to-update"
+  },
+  "update": {
+    "domain": "example.com",
+    "answer": "new-answer"
+  }
+}
+```
+
+
+
+## v0.107.29: API changes
+
+### `GET /control/clients` And `GET /control/clients/find`
+* The new optional fields `"ignore_querylog"` and `"ignore_statistics"` are set
+  if AdGuard Home excludes client activity from query log or statistics.
+
+### `POST /control/clients/add` And `POST /control/clients/update`
+* The new optional fields `"ignore_querylog"` and `"ignore_statistics"` make
+  AdGuard Home exclude client activity from query log or statistics.  If not
+  set AdGuard Home will use default value (false).  It can be changed in the
+  future versions.
+
+
+
 ## v0.107.27: API changes
 
 ### The new optional fields `"edns_cs_use_custom"` and `"edns_cs_custom_ip"` in `DNSConfig`
@@ -42,7 +235,9 @@ return a JSON object with the following format:
 {
   "enabled": true,
   "interval": 3600,
-  "ignored": ["example.com"],
+  "ignored": [
+    "example.com"
+  ]
 }
 ```
 
@@ -73,7 +268,9 @@ accept and return a JSON object with the following format:
   "enabled": true,
   "anonymize_client_ip": false,
   "interval": 3600,
-  "ignored": ["example.com"],
+  "ignored": [
+    "example.com"
+  ]
 }
 ```
 
@@ -205,7 +402,7 @@ JSON object with the following format:
 
 ```json
 {
-  "name":"user name", 
+  "name": "user name",
   "language": "en",
   "theme": "auto"
 }
@@ -281,8 +478,7 @@ the filters must be presented in a JSON object with the following format:
 
 ```json
 {
-  "rules":
-  [
+  "rules": [
     "||example.com^",
     "# comment",
     "@@||www.example.com^"

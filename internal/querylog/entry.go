@@ -58,13 +58,29 @@ func (e *logEntry) addResponse(resp *dns.Msg, isOrig bool) {
 
 	var err error
 	if isOrig {
-		e.Answer, err = resp.Pack()
-		err = errors.Annotate(err, "packing answer: %w")
-	} else {
 		e.OrigAnswer, err = resp.Pack()
 		err = errors.Annotate(err, "packing orig answer: %w")
+	} else {
+		e.Answer, err = resp.Pack()
+		err = errors.Annotate(err, "packing answer: %w")
 	}
 	if err != nil {
 		log.Error("querylog: %s", err)
+	}
+}
+
+// parseDNSRewriteResultIPs fills logEntry's DNSRewriteResult response records
+// with the IP addresses parsed from the raw strings.
+func (e *logEntry) parseDNSRewriteResultIPs() {
+	for rrType, rrValues := range e.Result.DNSRewriteResult.Response {
+		switch rrType {
+		case dns.TypeA, dns.TypeAAAA:
+			for i, v := range rrValues {
+				s, _ := v.(string)
+				rrValues[i] = net.ParseIP(s)
+			}
+		default:
+			// Go on.
+		}
 	}
 }

@@ -6,7 +6,7 @@ import { Trans, useTranslation } from 'react-i18next';
 import { useDispatch, useSelector } from 'react-redux';
 import ReactTable from 'react-table';
 
-import { getAllBlockedServices } from '../../../../actions/services';
+import { getAllBlockedServices, getBlockedServices } from '../../../../actions/services';
 import { initSettings } from '../../../../actions';
 import {
     splitByNewLine,
@@ -14,11 +14,12 @@ import {
     sortIp,
     getService,
 } from '../../../../helpers/helpers';
-import { MODAL_TYPE } from '../../../../helpers/constants';
+import { MODAL_TYPE, LOCAL_TIMEZONE_VALUE, TABLES_MIN_ROWS } from '../../../../helpers/constants';
 import Card from '../../../ui/Card';
 import CellWrap from '../../../ui/CellWrap';
 import LogsSearchLink from '../../../ui/LogsSearchLink';
 import Modal from '../Modal';
+import { LocalStorageHelper, LOCAL_STORAGE_KEYS } from '../../../../helpers/localStorageHelper';
 
 const ClientsTable = ({
     clients,
@@ -45,6 +46,7 @@ const ClientsTable = ({
 
     useEffect(() => {
         dispatch(getAllBlockedServices());
+        dispatch(getBlockedServices());
         dispatch(initSettings());
     }, []);
 
@@ -57,7 +59,7 @@ const ClientsTable = ({
     };
 
     const handleSubmit = (values) => {
-        const config = values;
+        const config = { ...values };
 
         if (values) {
             if (values.blocked_services) {
@@ -76,6 +78,10 @@ const ClientsTable = ({
                 config.tags = values.tags.map((tag) => tag.value);
             } else {
                 config.tags = [];
+            }
+
+            if (typeof values.upstreams_cache_size === 'string') {
+                config.upstreams_cache_size = 0;
             }
         }
 
@@ -112,6 +118,9 @@ const ClientsTable = ({
             tags: [],
             use_global_settings: true,
             use_global_blocked_services: true,
+            blocked_services_schedule: {
+                time_zone: LOCAL_TIMEZONE_VALUE,
+            },
             safe_search: { ...(safesearch || {}) },
         };
     };
@@ -338,8 +347,11 @@ const ClientsTable = ({
                     ]}
                     className="-striped -highlight card-table-overflow"
                     showPagination
-                    defaultPageSize={10}
-                    minRows={5}
+                    defaultPageSize={LocalStorageHelper.getItem(LOCAL_STORAGE_KEYS.CLIENTS_PAGE_SIZE) || 10}
+                    onPageSizeChange={(size) => (
+                        LocalStorageHelper.setItem(LOCAL_STORAGE_KEYS.CLIENTS_PAGE_SIZE, size)
+                    )}
+                    minRows={TABLES_MIN_ROWS}
                     ofText="/"
                     previousText={t('previous_btn')}
                     nextText={t('next_btn')}
