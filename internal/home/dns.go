@@ -18,6 +18,7 @@ import (
 	"github.com/AdguardTeam/AdGuardHome/internal/filtering"
 	"github.com/AdguardTeam/AdGuardHome/internal/querylog"
 	"github.com/AdguardTeam/AdGuardHome/internal/stats"
+	"github.com/AdguardTeam/dnsproxy/upstream"
 	"github.com/AdguardTeam/golibs/errors"
 	"github.com/AdguardTeam/golibs/log"
 	"github.com/AdguardTeam/golibs/netutil"
@@ -46,12 +47,15 @@ func onConfigModified() {
 // server and initializes it at last.  It also must not be called unless
 // [config] and [Context] are initialized.
 func initDNS() (err error) {
-	baseDir := Context.getDataDir()
-
 	anonymizer := config.anonymizer()
 
+	statsDir, querylogDir, err := checkStatsAndQuerylogDirs(&Context, config)
+	if err != nil {
+		return err
+	}
+
 	statsConf := stats.Config{
-		Filename:          filepath.Join(baseDir, "stats.db"),
+		Filename:          filepath.Join(statsDir, "stats.db"),
 		Limit:             config.Stats.Interval.Duration,
 		ConfigModified:    onConfigModified,
 		HTTPRegister:      httpRegister,
@@ -75,7 +79,7 @@ func initDNS() (err error) {
 		ConfigModified:    onConfigModified,
 		HTTPRegister:      httpRegister,
 		FindClient:        Context.clients.findMultiple,
-		BaseDir:           baseDir,
+		BaseDir:           querylogDir,
 		AnonymizeClientIP: config.DNS.AnonymizeClientIP,
 		RotationIvl:       config.QueryLog.Interval.Duration,
 		MemSize:           config.QueryLog.MemSize,
@@ -127,16 +131,11 @@ func initDNSServer(
 	httpReg aghhttp.RegisterFunc,
 	tlsConf *tlsConfigSettings,
 ) (err error) {
-	privateNets, err := parseSubnetSet(config.DNS.PrivateNets)
-	if err != nil {
-		return fmt.Errorf("preparing set of private subnets: %w", err)
-	}
-
 	Context.dnsServer, err = dnsforward.NewServer(dnsforward.DNSCreateParams{
 		DNSFilter:   filters,
 		Stats:       sts,
 		QueryLog:    qlog,
-		PrivateNets: privateNets,
+		PrivateNets: parseSubnetSet(config.DNS.PrivateNets),
 		Anonymizer:  anonymizer,
 		DHCPServer:  dhcpSrv,
 		EtcHosts:    Context.etcHosts,
@@ -159,6 +158,17 @@ func initDNSServer(
 	}
 
 	err = Context.dnsServer.Prepare(dnsConf)
+
+	// TODO(e.burkov):  Recreate the server with private RDNS disabled.  This
+	// should go away once the private RDNS resolution is moved to the proxy.
+	var locResErr *dnsforward.LocalResolversError
+	if errors.As(err, &locResErr) && errors.Is(locResErr.Err, upstream.ErrNoUpstreams) {
+		log.Info("WARNING: no local resolvers configured while private RDNS " +
+			"resolution enabled, trying to disable")
+		dnsConf.UsePrivateRDNS = false
+		err = Context.dnsServer.Prepare(dnsConf)
+	}
+
 	if err != nil {
 		return fmt.Errorf("dnsServer.Prepare: %w", err)
 	}
@@ -169,26 +179,15 @@ func initDNSServer(
 // parseSubnetSet parses a slice of subnets.  If the slice is empty, it returns
 // a subnet set that matches all locally served networks, see
 // [netutil.IsLocallyServed].
-func parseSubnetSet(nets []string) (s netutil.SubnetSet, err error) {
+func parseSubnetSet(nets []netutil.Prefix) (s netutil.SubnetSet) {
 	switch len(nets) {
 	case 0:
 		// Use an optimized function-based matcher.
-		return netutil.SubnetSetFunc(netutil.IsLocallyServed), nil
+		return netutil.SubnetSetFunc(netutil.IsLocallyServed)
 	case 1:
-		s, err = netutil.ParseSubnet(nets[0])
-		if err != nil {
-			return nil, err
-		}
-
-		return s, nil
+		return nets[0].Prefix
 	default:
-		var nets []*net.IPNet
-		nets, err = netutil.ParseSubnets(config.DNS.PrivateNets...)
-		if err != nil {
-			return nil, err
-		}
-
-		return netutil.SliceSubnetSet(nets), nil
+		return netutil.SliceSubnetSet(netutil.UnembedPrefixes(nets))
 	}
 }
 
@@ -411,9 +410,9 @@ func applyAdditionalFiltering(clientIP netip.Addr, clientID string, setts *filte
 
 	setts.ClientIP = clientIP
 
-	c, ok := Context.clients.Find(clientID)
+	c, ok := Context.clients.find(clientID)
 	if !ok {
-		c, ok = Context.clients.Find(clientIP.String())
+		c, ok = Context.clients.find(clientIP.String())
 		if !ok {
 			log.Debug("%s: no clients with ip %s and clientid %q", pref, clientIP, clientID)
 
@@ -440,7 +439,7 @@ func applyAdditionalFiltering(clientIP netip.Addr, clientID string, setts *filte
 	}
 
 	setts.FilteringEnabled = c.FilteringEnabled
-	setts.SafeSearchEnabled = c.safeSearchConf.Enabled
+	setts.SafeSearchEnabled = c.SafeSearchConf.Enabled
 	setts.ClientSafeSearch = c.SafeSearch
 	setts.SafeBrowsingEnabled = c.SafeBrowsingEnabled
 	setts.ParentalEnabled = c.ParentalEnabled
@@ -560,4 +559,51 @@ func (r safeSearchResolver) LookupIP(
 	}
 
 	return ips, nil
+}
+
+// checkStatsAndQuerylogDirs checks and returns directory paths to store
+// statistics and query log.
+func checkStatsAndQuerylogDirs(
+	ctx *homeContext,
+	conf *configuration,
+) (statsDir, querylogDir string, err error) {
+	baseDir := ctx.getDataDir()
+
+	statsDir = conf.Stats.DirPath
+	if statsDir == "" {
+		statsDir = baseDir
+	} else {
+		err = checkDir(statsDir)
+		if err != nil {
+			return "", "", fmt.Errorf("statistics: custom directory: %w", err)
+		}
+	}
+
+	querylogDir = conf.QueryLog.DirPath
+	if querylogDir == "" {
+		querylogDir = baseDir
+	} else {
+		err = checkDir(querylogDir)
+		if err != nil {
+			return "", "", fmt.Errorf("querylog: custom directory: %w", err)
+		}
+	}
+
+	return statsDir, querylogDir, nil
+}
+
+// checkDir checks if the path is a directory.  It's used to check for
+// misconfiguration at startup.
+func checkDir(path string) (err error) {
+	var fi os.FileInfo
+	if fi, err = os.Stat(path); err != nil {
+		// Don't wrap the error, since it's informative enough as is.
+		return err
+	}
+
+	if !fi.IsDir() {
+		return fmt.Errorf("%q is not a directory", path)
+	}
+
+	return nil
 }

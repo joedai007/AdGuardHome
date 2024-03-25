@@ -77,12 +77,13 @@ func TestDNSForwardHTTP_handleGetConfig(t *testing.T) {
 			FallbackDNS:            []string{"9.9.9.10"},
 			RatelimitSubnetLenIPv4: 24,
 			RatelimitSubnetLenIPv6: 56,
+			UpstreamMode:           UpstreamModeLoadBalance,
 			EDNSClientSubnet:       &EDNSClientSubnet{Enabled: false},
 		},
 		ConfigModified: func() {},
 		ServePlainDNS:  true,
 	}
-	s := createTestServer(t, filterConf, forwardConf, nil)
+	s := createTestServer(t, filterConf, forwardConf)
 	s.sysResolvers = &emptySysResolvers{}
 
 	require.NoError(t, s.Start())
@@ -103,7 +104,7 @@ func TestDNSForwardHTTP_handleGetConfig(t *testing.T) {
 	}, {
 		conf: func() ServerConfig {
 			conf := defaultConf
-			conf.FastestAddr = true
+			conf.UpstreamMode = UpstreamModeFastestAddr
 
 			return conf
 		},
@@ -111,7 +112,7 @@ func TestDNSForwardHTTP_handleGetConfig(t *testing.T) {
 	}, {
 		conf: func() ServerConfig {
 			conf := defaultConf
-			conf.AllServers = true
+			conf.UpstreamMode = UpstreamModeParallel
 
 			return conf
 		},
@@ -157,12 +158,13 @@ func TestDNSForwardHTTP_handleSetConfig(t *testing.T) {
 			UpstreamDNS:            []string{"8.8.8.8:53", "8.8.4.4:53"},
 			RatelimitSubnetLenIPv4: 24,
 			RatelimitSubnetLenIPv6: 56,
+			UpstreamMode:           UpstreamModeLoadBalance,
 			EDNSClientSubnet:       &EDNSClientSubnet{Enabled: false},
 		},
 		ConfigModified: func() {},
 		ServePlainDNS:  true,
 	}
-	s := createTestServer(t, filterConf, forwardConf, nil)
+	s := createTestServer(t, filterConf, forwardConf)
 	s.sysResolvers = &emptySysResolvers{}
 
 	defaultConf := s.conf
@@ -221,15 +223,16 @@ func TestDNSForwardHTTP_handleSetConfig(t *testing.T) {
 		wantSet: "",
 	}, {
 		name: "upstream_dns_bad",
-		wantSet: `validating dns config: ` +
-			`upstream servers: validating upstream "!!!": not an ip:port`,
+		wantSet: `validating dns config: upstream servers: parsing error at index 0: ` +
+			`cannot prepare the upstream: invalid address !!!: bad hostname "!!!": ` +
+			`bad top-level domain name label "!!!": bad top-level domain name label rune '!'`,
 	}, {
 		name: "bootstraps_bad",
-		wantSet: `validating dns config: checking bootstrap a: invalid address: not a bootstrap: ` +
-			`ParseAddr("a"): unable to parse IP`,
+		wantSet: `validating dns config: checking bootstrap a: not a bootstrap: ParseAddr("a"): ` +
+			`unable to parse IP`,
 	}, {
 		name:    "cache_bad_ttl",
-		wantSet: `validating dns config: cache_ttl_min must be less or equal than cache_ttl_max`,
+		wantSet: `validating dns config: cache_ttl_min must be less than or equal to cache_ttl_max`,
 	}, {
 		name:    "upstream_mode_bad",
 		wantSet: `validating dns config: upstream_mode: incorrect value "somethingelse"`,
@@ -308,98 +311,6 @@ func TestIsCommentOrEmpty(t *testing.T) {
 		str:  "1.2.3.4",
 	}} {
 		tc.want(t, IsCommentOrEmpty(tc.str))
-	}
-}
-
-func TestValidateUpstreams(t *testing.T) {
-	const sdnsStamp = `sdns://AQMAAAAAAAAAFDE3Ni4xMDMuMTMwLjEzMDo1NDQzINErR_J` +
-		`S3PLCu_iZEIbq95zkSV2LFsigxDIuUso_OQhzIjIuZG5zY3J5cHQuZGVmYXVsdC5uczE` +
-		`uYWRndWFyZC5jb20`
-
-	testCases := []struct {
-		name    string
-		wantErr string
-		set     []string
-	}{{
-		name:    "empty",
-		wantErr: ``,
-		set:     nil,
-	}, {
-		name:    "comment",
-		wantErr: ``,
-		set:     []string{"# comment"},
-	}, {
-		name:    "no_default",
-		wantErr: `no default upstreams specified`,
-		set: []string{
-			"[/host.com/]1.1.1.1",
-			"[//]tls://1.1.1.1",
-			"[/www.host.com/]#",
-			"[/host.com/google.com/]8.8.8.8",
-			"[/host/]" + sdnsStamp,
-		},
-	}, {
-		name:    "with_default",
-		wantErr: ``,
-		set: []string{
-			"[/host.com/]1.1.1.1",
-			"[//]tls://1.1.1.1",
-			"[/www.host.com/]#",
-			"[/host.com/google.com/]8.8.8.8",
-			"[/host/]" + sdnsStamp,
-			"8.8.8.8",
-		},
-	}, {
-		name:    "invalid",
-		wantErr: `validating upstream "dhcp://fake.dns": bad protocol "dhcp"`,
-		set:     []string{"dhcp://fake.dns"},
-	}, {
-		name:    "invalid",
-		wantErr: `validating upstream "1.2.3.4.5": not an ip:port`,
-		set:     []string{"1.2.3.4.5"},
-	}, {
-		name:    "invalid",
-		wantErr: `validating upstream "123.3.7m": not an ip:port`,
-		set:     []string{"123.3.7m"},
-	}, {
-		name: "invalid",
-		wantErr: `splitting upstream line "[/host.com]tls://dns.adguard.com": ` +
-			`missing separator`,
-		set: []string{"[/host.com]tls://dns.adguard.com"},
-	}, {
-		name:    "invalid",
-		wantErr: `validating upstream "[host.ru]#": not an ip:port`,
-		set:     []string{"[host.ru]#"},
-	}, {
-		name:    "valid_default",
-		wantErr: ``,
-		set: []string{
-			"1.1.1.1",
-			"tls://1.1.1.1",
-			"https://dns.adguard.com/dns-query",
-			sdnsStamp,
-			"udp://dns.google",
-			"udp://8.8.8.8",
-			"[/host.com/]1.1.1.1",
-			"[//]tls://1.1.1.1",
-			"[/www.host.com/]#",
-			"[/host.com/google.com/]8.8.8.8",
-			"[/host/]" + sdnsStamp,
-			"[/пример.рф/]8.8.8.8",
-		},
-	}, {
-		name: "bad_domain",
-		wantErr: `splitting upstream line "[/!/]8.8.8.8": domain at index 0: ` +
-			`bad domain name "!": bad top-level domain name label "!": ` +
-			`bad top-level domain name label rune '!'`,
-		set: []string{"[/!/]8.8.8.8"},
-	}}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			err := ValidateUpstreams(tc.set)
-			testutil.AssertErrorMsg(t, tc.wantErr, err)
-		})
 	}
 }
 
@@ -507,6 +418,7 @@ func TestServer_HandleTestUpstreamDNS(t *testing.T) {
 			},
 		},
 		&aghtest.FSWatcher{
+			OnStart:  func() (_ error) { panic("not implemented") },
 			OnEvents: func() (e <-chan struct{}) { return nil },
 			OnAdd:    func(_ string) (err error) { return nil },
 			OnClose:  func() (err error) { return nil },
@@ -523,10 +435,11 @@ func TestServer_HandleTestUpstreamDNS(t *testing.T) {
 		TCPListenAddrs:  []*net.TCPAddr{{}},
 		UpstreamTimeout: upsTimeout,
 		Config: Config{
+			UpstreamMode:     UpstreamModeLoadBalance,
 			EDNSClientSubnet: &EDNSClientSubnet{Enabled: false},
 		},
 		ServePlainDNS: true,
-	}, nil)
+	})
 	srv.etcHosts = upstream.NewHostsResolver(hc)
 	startDeferStop(t, srv)
 

@@ -38,10 +38,11 @@ func TestServer_FilterDNSRewrite(t *testing.T) {
 		BlockingMode: filtering.BlockingModeDefault,
 	}, ServerConfig{
 		Config: Config{
+			UpstreamMode:     UpstreamModeLoadBalance,
 			EDNSClientSubnet: &EDNSClientSubnet{Enabled: false},
 		},
 		ServePlainDNS: true,
-	}, nil)
+	})
 
 	makeQ := func(qtype rules.RRType) (req *dns.Msg) {
 		return &dns.Msg{

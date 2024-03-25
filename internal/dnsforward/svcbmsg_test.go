@@ -17,10 +17,11 @@ func TestGenAnswerHTTPS_andSVCB(t *testing.T) {
 		BlockingMode: filtering.BlockingModeDefault,
 	}, ServerConfig{
 		Config: Config{
+			UpstreamMode:     UpstreamModeLoadBalance,
 			EDNSClientSubnet: &EDNSClientSubnet{Enabled: false},
 		},
 		ServePlainDNS: true,
-	}, nil)
+	})
 
 	req := &dns.Msg{
 		Question: []dns.Question{{

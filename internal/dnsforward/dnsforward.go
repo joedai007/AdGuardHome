@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/netip"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -30,7 +31,6 @@ import (
 	"github.com/AdguardTeam/golibs/netutil/sysresolv"
 	"github.com/AdguardTeam/golibs/stringutil"
 	"github.com/miekg/dns"
-	"golang.org/x/exp/slices"
 )
 
 // DefaultTimeout is the default upstream timeout
@@ -81,8 +81,11 @@ type DHCP interface {
 	Enabled() (ok bool)
 }
 
+// SystemResolvers is an interface for accessing the OS-provided resolvers.
 type SystemResolvers interface {
-	// Addrs returns the list of system resolvers' addresses.
+	// Addrs returns the list of system resolvers' addresses.  Callers must
+	// clone the returned slice before modifying it.  Implementations of Addrs
+	// must be safe for concurrent use.
 	Addrs() (addrs []netip.AddrPort)
 }
 
@@ -310,7 +313,7 @@ func (s *Server) WriteDiskConfig(c *Config) {
 	c.AllowedClients = stringutil.CloneSlice(sc.AllowedClients)
 	c.DisallowedClients = stringutil.CloneSlice(sc.DisallowedClients)
 	c.BlockedHosts = stringutil.CloneSlice(sc.BlockedHosts)
-	c.TrustedProxies = stringutil.CloneSlice(sc.TrustedProxies)
+	c.TrustedProxies = slices.Clone(sc.TrustedProxies)
 	c.UpstreamDNS = stringutil.CloneSlice(sc.UpstreamDNS)
 }
 
@@ -389,7 +392,7 @@ func (s *Server) Exchange(ip netip.Addr) (host string, ttl time.Duration, err er
 
 	var resolver *proxy.Proxy
 	var errMsg string
-	if s.privateNets.Contains(ip.AsSlice()) {
+	if s.privateNets.Contains(ip) {
 		if !s.conf.UsePrivateRDNS {
 			return "", 0, nil
 		}
@@ -461,7 +464,8 @@ func (s *Server) Start() error {
 // startLocked starts the DNS server without locking.  s.serverLock is expected
 // to be locked.
 func (s *Server) startLocked() error {
-	err := s.dnsProxy.Start()
+	// TODO(e.burkov):  Use context properly.
+	err := s.dnsProxy.Start(context.Background())
 	if err == nil {
 		s.isRunning = true
 	}
@@ -469,13 +473,15 @@ func (s *Server) startLocked() error {
 	return err
 }
 
-// setupLocalResolvers initializes the resolvers for local addresses.  It
-// assumes s.serverLock is locked or the Server not running.
-func (s *Server) setupLocalResolvers(boot upstream.Resolver) (err error) {
+// prepareLocalResolvers initializes the local upstreams configuration using
+// boot as bootstrap.  It assumes that s.serverLock is locked or s not running.
+func (s *Server) prepareLocalResolvers(
+	boot upstream.Resolver,
+) (uc *proxy.UpstreamConfig, err error) {
 	set, err := s.conf.ourAddrsSet()
 	if err != nil {
 		// Don't wrap the error because it's informative enough as is.
-		return err
+		return nil, err
 	}
 
 	resolvers := s.conf.LocalPTRResolvers
@@ -492,38 +498,76 @@ func (s *Server) setupLocalResolvers(boot upstream.Resolver) (err error) {
 
 	log.Debug("dnsforward: upstreams to resolve ptr for local addresses: %v", resolvers)
 
-	uc, err := s.prepareUpstreamConfig(resolvers, nil, &upstream.Options{
+	uc, err = s.prepareUpstreamConfig(resolvers, nil, &upstream.Options{
 		Bootstrap: boot,
 		Timeout:   defaultLocalTimeout,
 		// TODO(e.burkov): Should we verify server's certificates?
 		PreferIPv6: s.conf.BootstrapPreferIPv6,
 	})
 	if err != nil {
-		return fmt.Errorf("preparing private upstreams: %w", err)
+		return nil, fmt.Errorf("preparing private upstreams: %w", err)
 	}
 
 	if confNeedsFiltering {
 		err = filterOutAddrs(uc, set)
 		if err != nil {
-			return fmt.Errorf("filtering private upstreams: %w", err)
+			return nil, fmt.Errorf("filtering private upstreams: %w", err)
 		}
 	}
 
-	s.localResolvers = &proxy.Proxy{
-		Config: proxy.Config{
-			UpstreamConfig: uc,
-		},
+	return uc, nil
+}
+
+// LocalResolversError is an error type for errors during local resolvers setup.
+// This is only needed to distinguish these errors from errors returned by
+// creating the proxy.
+type LocalResolversError struct {
+	Err error
+}
+
+// type check
+var _ error = (*LocalResolversError)(nil)
+
+// Error implements the error interface for *LocalResolversError.
+func (err *LocalResolversError) Error() (s string) {
+	return fmt.Sprintf("creating local resolvers: %s", err.Err)
+}
+
+// type check
+var _ errors.Wrapper = (*LocalResolversError)(nil)
+
+// Unwrap implements the [errors.Wrapper] interface for *LocalResolversError.
+func (err *LocalResolversError) Unwrap() error {
+	return err.Err
+}
+
+// setupLocalResolvers initializes and sets the resolvers for local addresses.
+// It assumes s.serverLock is locked or s not running.  It returns the upstream
+// configuration used for private PTR resolving, or nil if it's disabled.  Note,
+// that it's safe to put nil into [proxy.Config.PrivateRDNSUpstreamConfig].
+func (s *Server) setupLocalResolvers(boot upstream.Resolver) (uc *proxy.UpstreamConfig, err error) {
+	if !s.conf.UsePrivateRDNS {
+		// It's safe to put nil into [proxy.Config.PrivateRDNSUpstreamConfig].
+		return nil, nil
 	}
+
+	uc, err = s.prepareLocalResolvers(boot)
+	if err != nil {
+		// Don't wrap the error because it's informative enough as is.
+		return nil, err
+	}
+
+	localResolvers, err := proxy.New(&proxy.Config{
+		UpstreamConfig: uc,
+	})
+	if err != nil {
+		return nil, &LocalResolversError{Err: err}
+	}
+
+	s.localResolvers = localResolvers
 
 	// TODO(e.burkov):  Should we also consider the DNS64 usage?
-	if s.conf.UsePrivateRDNS &&
-		// Only set the upstream config if there are any upstreams.  It's safe
-		// to put nil into [proxy.Config.PrivateRDNSUpstreamConfig].
-		len(uc.Upstreams)+len(uc.DomainReservedUpstreams)+len(uc.SpecifiedDomainUpstreams) > 0 {
-		s.dnsProxy.PrivateRDNSUpstreamConfig = uc
-	}
-
-	return nil
+	return uc, nil
 }
 
 // Prepare initializes parameters of s using data from conf.  conf must not be
@@ -564,20 +608,23 @@ func (s *Server) Prepare(conf *ServerConfig) (err error) {
 		return fmt.Errorf("preparing access: %w", err)
 	}
 
-	// Set the proxy here because [setupLocalResolvers] sets its values.
-	//
 	// TODO(e.burkov):  Remove once the local resolvers logic moved to dnsproxy.
-	s.dnsProxy = &proxy.Proxy{Config: *proxyConfig}
-
-	err = s.setupLocalResolvers(boot)
+	proxyConfig.PrivateRDNSUpstreamConfig, err = s.setupLocalResolvers(boot)
 	if err != nil {
 		return fmt.Errorf("setting up resolvers: %w", err)
 	}
 
-	err = s.setupFallbackDNS()
+	proxyConfig.Fallbacks, err = s.setupFallbackDNS()
 	if err != nil {
 		return fmt.Errorf("setting up fallback dns servers: %w", err)
 	}
+
+	dnsProxy, err := proxy.New(proxyConfig)
+	if err != nil {
+		return fmt.Errorf("creating proxy: %w", err)
+	}
+
+	s.dnsProxy = dnsProxy
 
 	s.recDetector.clear()
 
@@ -621,26 +668,25 @@ func (s *Server) prepareInternalDNS() (boot upstream.Resolver, err error) {
 }
 
 // setupFallbackDNS initializes the fallback DNS servers.
-func (s *Server) setupFallbackDNS() (err error) {
+func (s *Server) setupFallbackDNS() (uc *proxy.UpstreamConfig, err error) {
 	fallbacks := s.conf.FallbackDNS
 	fallbacks = stringutil.FilterOut(fallbacks, IsCommentOrEmpty)
 	if len(fallbacks) == 0 {
-		return nil
+		return nil, nil
 	}
 
-	uc, err := proxy.ParseUpstreamsConfig(fallbacks, &upstream.Options{
+	uc, err = proxy.ParseUpstreamsConfig(fallbacks, &upstream.Options{
 		// TODO(s.chzhen):  Investigate if other options are needed.
 		Timeout:    s.conf.UpstreamTimeout,
 		PreferIPv6: s.conf.BootstrapPreferIPv6,
+		// TODO(e.burkov):  Use bootstrap.
 	})
 	if err != nil {
 		// Do not wrap the error because it's informative enough as is.
-		return err
+		return nil, err
 	}
 
-	s.dnsProxy.Fallbacks = uc
-
-	return nil
+	return uc, nil
 }
 
 // setupAddrProc initializes the address processor.  It assumes s.serverLock is
@@ -700,29 +746,17 @@ func (s *Server) prepareInternalProxy() (err error) {
 		CacheEnabled:   true,
 		CacheSizeBytes: 4096,
 		UpstreamConfig: srvConf.UpstreamConfig,
-		MaxGoroutines:  int(s.conf.MaxGoroutines),
+		MaxGoroutines:  s.conf.MaxGoroutines,
 	}
 
-	setProxyUpstreamMode(
-		conf,
-		srvConf.AllServers,
-		srvConf.FastestAddr,
-		srvConf.FastestTimeout.Duration,
-	)
-
-	// TODO(a.garipov): Make a proper constructor for proxy.Proxy.
-	p := &proxy.Proxy{
-		Config: *conf,
-	}
-
-	err = p.Init()
+	err = setProxyUpstreamMode(conf, srvConf.UpstreamMode, srvConf.FastestTimeout.Duration)
 	if err != nil {
-		return err
+		return fmt.Errorf("invalid upstream mode: %w", err)
 	}
 
-	s.internalProxy = p
+	s.internalProxy, err = proxy.New(conf)
 
-	return nil
+	return err
 }
 
 // Stop stops the DNS server.
@@ -741,14 +775,17 @@ func (s *Server) stopLocked() (err error) {
 	// [upstream.Upstream] implementations.
 
 	if s.dnsProxy != nil {
-		err = s.dnsProxy.Stop()
+		// TODO(e.burkov):  Use context properly.
+		err = s.dnsProxy.Shutdown(context.Background())
 		if err != nil {
 			log.Error("dnsforward: closing primary resolvers: %s", err)
 		}
 	}
 
 	logCloserErr(s.internalProxy.UpstreamConfig, "dnsforward: closing internal resolvers: %s")
-	logCloserErr(s.localResolvers.UpstreamConfig, "dnsforward: closing local resolvers: %s")
+	if s.localResolvers != nil {
+		logCloserErr(s.localResolvers.UpstreamConfig, "dnsforward: closing local resolvers: %s")
+	}
 
 	for _, b := range s.bootResolvers {
 		logCloserErr(b, "dnsforward: closing bootstrap %s: %s", b.Address())
@@ -821,6 +858,8 @@ func (s *Server) Reconfigure(conf *ServerConfig) error {
 		}
 	}
 
+	// TODO(e.burkov):  It seems an error here brings the server down, which is
+	// not reliable enough.
 	err = s.Prepare(conf)
 	if err != nil {
 		return fmt.Errorf("could not reconfigure the server: %w", err)

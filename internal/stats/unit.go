@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"encoding/gob"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/AdguardTeam/AdGuardHome/internal/aghnet"
@@ -12,7 +13,6 @@ import (
 	"github.com/AdguardTeam/golibs/log"
 	"go.etcd.io/bbolt"
 	"golang.org/x/exp/maps"
-	"golang.org/x/exp/slices"
 )
 
 const (
@@ -510,6 +510,10 @@ func (s *StatsCtx) fillCollectedStats(data *StatsResp, units []*unitDB, curID ui
 
 // fillCollectedStatsDaily fills data with collected daily statistics.  units
 // must contain data for the count of days.
+//
+// TODO(s.chzhen):  Improve collection of statistics for frontend.  Dashboard
+// cards should contain statistics for the whole interval without rounding to
+// days.
 func (s *StatsCtx) fillCollectedStatsDaily(
 	data *StatsResp,
 	units []*unitDB,

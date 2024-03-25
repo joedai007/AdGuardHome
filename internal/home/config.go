@@ -10,7 +10,7 @@ import (
 
 	"github.com/AdguardTeam/AdGuardHome/internal/aghalg"
 	"github.com/AdguardTeam/AdGuardHome/internal/aghtls"
-	"github.com/AdguardTeam/AdGuardHome/internal/confmigrate"
+	"github.com/AdguardTeam/AdGuardHome/internal/configmigrate"
 	"github.com/AdguardTeam/AdGuardHome/internal/dhcpd"
 	"github.com/AdguardTeam/AdGuardHome/internal/dnsforward"
 	"github.com/AdguardTeam/AdGuardHome/internal/filtering"
@@ -20,6 +20,7 @@ import (
 	"github.com/AdguardTeam/dnsproxy/fastip"
 	"github.com/AdguardTeam/golibs/errors"
 	"github.com/AdguardTeam/golibs/log"
+	"github.com/AdguardTeam/golibs/netutil"
 	"github.com/AdguardTeam/golibs/timeutil"
 	"github.com/google/renameio/v2/maybe"
 	yaml "gopkg.in/yaml.v3"
@@ -149,7 +150,7 @@ type configuration struct {
 	sync.RWMutex `yaml:"-"`
 
 	// SchemaVersion is the version of the configuration schema.  See
-	// [confmigrate.LastSchemaVersion].
+	// [configmigrate.LastSchemaVersion].
 	SchemaVersion uint `yaml:"schema_version"`
 }
 
@@ -200,7 +201,7 @@ type dnsConfig struct {
 
 	// PrivateNets is the set of IP networks for which the private reverse DNS
 	// resolver should be used.
-	PrivateNets []string `yaml:"private_networks"`
+	PrivateNets []netutil.Prefix `yaml:"private_networks"`
 
 	// UsePrivateRDNS defines if the PTR requests for unknown addresses from
 	// locally-served networks should be resolved via private PTR resolvers.
@@ -231,6 +232,10 @@ type dnsConfig struct {
 
 	// ServePlainDNS defines if plain DNS is allowed for incoming requests.
 	ServePlainDNS bool `yaml:"serve_plain_dns"`
+
+	// HostsFileEnabled defines whether to use information from the system hosts
+	// file to resolve queries.
+	HostsFileEnabled bool `yaml:"hostsfile_enabled"`
 }
 
 type tlsConfigSettings struct {
@@ -258,6 +263,10 @@ type tlsConfigSettings struct {
 }
 
 type queryLogConfig struct {
+	// DirPath is the custom directory for logs.  If it's empty the default
+	// directory will be used.  See [homeContext.getDataDir].
+	DirPath string `yaml:"dir_path"`
+
 	// Ignored is the list of host names, which should not be written to log.
 	// "." is considered to be the root domain.
 	Ignored []string `yaml:"ignored"`
@@ -267,7 +276,7 @@ type queryLogConfig struct {
 
 	// MemSize is the number of entries kept in memory before they are flushed
 	// to disk.
-	MemSize int `yaml:"size_memory"`
+	MemSize uint `yaml:"size_memory"`
 
 	// Enabled defines if the query log is enabled.
 	Enabled bool `yaml:"enabled"`
@@ -277,6 +286,10 @@ type queryLogConfig struct {
 }
 
 type statsConfig struct {
+	// DirPath is the custom directory for statistics.  If it's empty the
+	// default directory is used.  See [homeContext.getDataDir].
+	DirPath string `yaml:"dir_path"`
+
 	// Ignored is the list of host names, which should not be counted.
 	Ignored []string `yaml:"ignored"`
 
@@ -315,14 +328,18 @@ var config = &configuration{
 			RatelimitSubnetLenIPv4: 24,
 			RatelimitSubnetLenIPv6: 56,
 			RefuseAny:              true,
-			AllServers:             false,
+			UpstreamMode:           dnsforward.UpstreamModeLoadBalance,
 			HandleDDR:              true,
 			FastestTimeout: timeutil.Duration{
 				Duration: fastip.DefaultPingWaitTimeout,
 			},
 
-			TrustedProxies: []string{"127.0.0.0/8", "::1/128"},
-			CacheSize:      4 * 1024 * 1024,
+			TrustedProxies: []netutil.Prefix{{
+				Prefix: netip.MustParsePrefix("127.0.0.0/8"),
+			}, {
+				Prefix: netip.MustParsePrefix("::1/128"),
+			}},
+			CacheSize: 4 * 1024 * 1024,
 
 			EDNSClientSubnet: &dnsforward.EDNSClientSubnet{
 				CustomIP:  netip.Addr{},
@@ -336,9 +353,10 @@ var config = &configuration{
 			// was later increased to 300 due to https://github.com/AdguardTeam/AdGuardHome/issues/2257
 			MaxGoroutines: 300,
 		},
-		UpstreamTimeout: timeutil.Duration{Duration: dnsforward.DefaultTimeout},
-		UsePrivateRDNS:  true,
-		ServePlainDNS:   true,
+		UpstreamTimeout:  timeutil.Duration{Duration: dnsforward.DefaultTimeout},
+		UsePrivateRDNS:   true,
+		ServePlainDNS:    true,
+		HostsFileEnabled: true,
 	},
 	TLS: tlsConfigSettings{
 		PortHTTPS:       defaultPortHTTPS,
@@ -434,24 +452,29 @@ var config = &configuration{
 		MaxAge:     3,
 	},
 	OSConfig:      &osConfig{},
-	SchemaVersion: confmigrate.LastSchemaVersion,
+	SchemaVersion: configmigrate.LastSchemaVersion,
 	Theme:         ThemeAuto,
 }
 
-// getConfigFilename returns path to the current config file
-func (c *configuration) getConfigFilename() string {
-	configFile, err := filepath.EvalSymlinks(Context.configFilename)
+// configFilePath returns the absolute path to the symlink-evaluated path to the
+// current config file.
+func configFilePath() (confPath string) {
+	confPath, err := filepath.EvalSymlinks(Context.confFilePath)
 	if err != nil {
-		if !errors.Is(err, os.ErrNotExist) {
-			log.Error("unexpected error while config file path evaluation: %s", err)
+		confPath = Context.confFilePath
+		logFunc := log.Error
+		if errors.Is(err, os.ErrNotExist) {
+			logFunc = log.Debug
 		}
-		configFile = Context.configFilename
-	}
-	if !filepath.IsAbs(configFile) {
-		configFile = filepath.Join(Context.workDir, configFile)
+
+		logFunc("evaluating config path: %s; using %q", err, confPath)
 	}
 
-	return configFile
+	if !filepath.IsAbs(confPath) {
+		confPath = filepath.Join(Context.workDir, confPath)
+	}
+
+	return confPath
 }
 
 // validateBindHosts returns error if any of binding hosts from configuration is
@@ -479,20 +502,23 @@ func parseConfig() (err error) {
 		return err
 	}
 
-	migrator := confmigrate.New(&confmigrate.Config{
+	migrator := configmigrate.New(&configmigrate.Config{
 		WorkingDir: Context.workDir,
 	})
 
 	var upgraded bool
 	config.fileData, upgraded, err = migrator.Migrate(
 		config.fileData,
-		confmigrate.LastSchemaVersion,
+		configmigrate.LastSchemaVersion,
 	)
 	if err != nil {
 		// Don't wrap the error, because it's informative enough as is.
 		return err
 	} else if upgraded {
-		err = maybe.WriteFile(config.getConfigFilename(), config.fileData, 0o644)
+		confPath := configFilePath()
+		log.Debug("writing config file %q after config upgrade", confPath)
+
+		err = maybe.WriteFile(confPath, config.fileData, 0o644)
 		if err != nil {
 			return fmt.Errorf("writing new config: %w", err)
 		}
@@ -513,12 +539,8 @@ func parseConfig() (err error) {
 		config.DNS.UpstreamTimeout = timeutil.Duration{Duration: dnsforward.DefaultTimeout}
 	}
 
-	err = setContextTLSCipherIDs()
-	if err != nil {
-		return err
-	}
-
-	return nil
+	// Do not wrap the error because it's informative enough as is.
+	return setContextTLSCipherIDs()
 }
 
 // validateConfig returns error if the configuration is invalid.
@@ -582,11 +604,11 @@ func readConfigFile() (fileData []byte, err error) {
 		return config.fileData, nil
 	}
 
-	name := config.getConfigFilename()
-	log.Debug("reading config file: %s", name)
+	confPath := configFilePath()
+	log.Debug("reading config file %q", confPath)
 
 	// Do not wrap the error because it's informative enough as is.
-	return os.ReadFile(name)
+	return os.ReadFile(confPath)
 }
 
 // Saves configuration to the YAML file and also saves the user filter contents to a file
@@ -650,8 +672,8 @@ func (c *configuration) write() (err error) {
 
 	config.Clients.Persistent = Context.clients.forConfig()
 
-	configFile := config.getConfigFilename()
-	log.Debug("writing config file %q", configFile)
+	confPath := configFilePath()
+	log.Debug("writing config file %q", confPath)
 
 	buf := &bytes.Buffer{}
 	enc := yaml.NewEncoder(buf)
@@ -662,7 +684,7 @@ func (c *configuration) write() (err error) {
 		return fmt.Errorf("generating config file: %w", err)
 	}
 
-	err = maybe.WriteFile(configFile, buf.Bytes(), 0o644)
+	err = maybe.WriteFile(confPath, buf.Bytes(), 0o644)
 	if err != nil {
 		return fmt.Errorf("writing config file: %w", err)
 	}
